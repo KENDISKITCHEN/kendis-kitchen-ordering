@@ -17,7 +17,7 @@ const MENU = [
   ["Fried Rice Full Tray",120],["Fried Rice Half Tray",60],
   ["Bitter Leaf Half Tray",180],["Assorted Beef Full Tray",350],
   ["Full Beef Tray",400],["Ayamase (Designer) Stew Full Tray",360],
-  ["Ayamase (Designer) Stew Half Tray",360],["Fried Plantain Full Tray",120],
+  ["Ayamase (Designer) Stew Half Tray",180],["Fried Plantain Full Tray",120],
   ["Fried Plantain Half Tray",60],["Moimoi (12 pieces)",60],["Moimoi (Full Tray)",120],
   ["Stewed Chicken Full Tray",160],["Stewed Chicken Half Tray",80],
   ["Chicken Soup Full Tray",140],["Chicken Soup Half Tray",70],
