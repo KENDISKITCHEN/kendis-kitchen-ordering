@@ -111,7 +111,7 @@ async function findOrCreateProduct(item) {
     productCreate(input: $input) {
       didSucceed
       inputErrors { message code path }
-      product { id name unitPrice { value } }
+      product { id name unitPrice }
     }
   }`;
   const created = await wave(m, {
