@@ -98,7 +98,7 @@ async function findOrCreateProduct(item) {
   const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
     business(id: $businessId) {
       products(page: $page, pageSize: $pageSize, isArchived: false) {
-        edges { node { id name unitPrice }
+        edges { node { id name unitPrice } }
       }
     }
   }`;
@@ -221,6 +221,6 @@ app.post("/api/order", async (req, res) => {
   }
 });
 
-app.use((req, res) => { res.sendFile(path.join(__dirname, "public", "index.html"));});
+app.use((req, res) => { res.sendFile(path.join(__dirname, 'public', 'index.html'));});
 
 app.listen(PORT, () => console.log(`Kendis Kitchen order app running on port ${PORT}`));
