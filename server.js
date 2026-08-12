@@ -94,7 +94,7 @@ async function createCustomer(customer) {
   return out.customer;
 }
 
-async function findOrCreateProduct(item) {
+async function findOrCreateProduct(item) { 
   const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
     business(id: $businessId) {
       products(page: $page, pageSize: $pageSize, isArchived: false) {
@@ -126,7 +126,181 @@ async function findOrCreateProduct(item) {
   if (!out.didSucceed) throw new Error(out.inputErrors?.map(e => e.message).join("; ") || `Could not create Wave product ${item.name}.`);
   return out.product;
 }
+async function findIncomeAccount() {
+  // Use an account explicitly configured in Render if available.
+  if (process.env.WAVE_INCOME_ACCOUNT_ID) {
+    return process.env.WAVE_INCOME_ACCOUNT_ID;
+  }
 
+  // Otherwise find an active income account in Wave.
+  const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
+    business(id: $businessId) {
+      accounts(
+        page: $page,
+        pageSize: $pageSize,
+        subtypes: [INCOME, DISCOUNTS, OTHER_INCOME]
+      ) {
+        edges {
+          node {
+            id
+            name
+            isArchived
+            subtype {
+              value
+            }
+          }
+        }
+      }
+    }
+  }`;
+
+  const data = await wave(q, {
+    businessId: process.env.WAVE_BUSINESS_ID,
+    page: 1,
+    pageSize: 50
+  });
+
+  const account = data.business?.accounts?.edges
+    ?.map(e => e.node)
+    ?.find(a => !a.isArchived);
+
+  if (!account) {
+    throw new Error(
+      "No active Wave income account was found. Add WAVE_INCOME_ACCOUNT_ID in Render Environment."
+    );
+  }
+
+  return account.id;
+}
+
+
+async function findOrCreateProduct(item) {
+  const incomeAccountId = await findIncomeAccount();
+
+  const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
+    business(id: $businessId) {
+      products(
+        page: $page,
+        pageSize: $pageSize,
+        isArchived: false
+      ) {
+        edges {
+          node {
+            id
+            name
+            unitPrice
+            incomeAccount {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+  }`;
+
+  const data = await wave(q, {
+    businessId: process.env.WAVE_BUSINESS_ID,
+    page: 1,
+    pageSize: 100
+  });
+
+  const existing = data.business?.products?.edges
+    ?.map(e => e.node)
+    ?.find(
+      p => p.name.toLowerCase() === item.name.toLowerCase()
+    );
+
+  // If the product already exists and has an income account,
+  // use it.
+  if (existing?.incomeAccount?.id) {
+    return existing;
+  }
+
+  // If the product exists but has no income account,
+  // attach one.
+  if (existing && !existing.incomeAccount?.id) {
+    const patch = `mutation ($input: ProductPatchInput!) {
+      productPatch(input: $input) {
+        didSucceed
+        inputErrors {
+          message
+          code
+          path
+        }
+        product {
+          id
+          name
+          unitPrice
+          incomeAccount {
+            id
+            name
+          }
+        }
+      }
+    }`;
+
+    const patched = await wave(patch, {
+      input: {
+        id: existing.id,
+        incomeAccountId
+      }
+    });
+
+    const out = patched.productPatch;
+
+    if (!out.didSucceed) {
+      throw new Error(
+        out.inputErrors?.map(e => e.message).join("; ") ||
+        `Could not set income account for Wave product ${item.name}.`
+      );
+    }
+
+    return out.product;
+  }
+
+  // Product doesn't exist, so create it with the income account.
+  const m = `mutation ($input: ProductCreateInput!) {
+    productCreate(input: $input) {
+      didSucceed
+      inputErrors {
+        message
+        code
+        path
+      }
+      product {
+        id
+        name
+        unitPrice
+        incomeAccount {
+          id
+          name
+        }
+      }
+    }
+  }`;
+
+  const created = await wave(m, {
+    input: {
+      businessId: process.env.WAVE_BUSINESS_ID,
+      name: item.name,
+      unitPrice: money(item.price),
+      description: "Kendis Kitchen menu item",
+      incomeAccountId
+    }
+  });
+
+  const out = created.productCreate;
+
+  if (!out.didSucceed) {
+    throw new Error(
+      out.inputErrors?.map(e => e.message).join("; ") ||
+      `Could not create Wave product ${item.name}.`
+    );
+  }
+
+  return out.product;
+}
 app.get("/api/menu", (_req, res) => res.json(MENU));
 
 app.post("/api/order", async (req, res) => {
