@@ -94,24 +94,82 @@ async function createCustomer(customer) {
   return out.customer;
 }
 
+async function findIncomeAccount() {
+  // Use the account explicitly configured in Render when available.
+  // Otherwise, automatically use the first active INCOME account in Wave.
+  if (process.env.WAVE_INCOME_ACCOUNT_ID) return process.env.WAVE_INCOME_ACCOUNT_ID;
+
+  const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
+    business(id: $businessId) {
+      accounts(page: $page, pageSize: $pageSize, subtypes: [INCOME, OTHER_INCOME]) {
+        edges {
+          node { id name isArchived subtype { value } }
+        }
+      }
+    }
+  }`;
+  const data = await wave(q, {
+    businessId: process.env.WAVE_BUSINESS_ID,
+    page: 1,
+    pageSize: 50
+  });
+  const account = data.business?.accounts?.edges?.map(e => e.node)
+    .find(a => !a.isArchived);
+  if (!account) {
+    throw new Error(
+      "No active Wave income account was found. Add WAVE_INCOME_ACCOUNT_ID in Render Environment, using an account with subtype INCOME or OTHER_INCOME."
+    );
+  }
+  return account.id;
+}
+
 async function findOrCreateProduct(item) {
+  const incomeAccountId = await findIncomeAccount();
+
   const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
     business(id: $businessId) {
       products(page: $page, pageSize: $pageSize, isArchived: false) {
-        edges { node { id name unitPrice } }
+        edges {
+          node {
+            id name unitPrice
+            incomeAccount { id name }
+          }
+        }
       }
     }
   }`;
   const data = await wave(q, { businessId: process.env.WAVE_BUSINESS_ID, page: 1, pageSize: 100 });
   const existing = data.business?.products?.edges?.map(e => e.node)
     .find(p => p.name.toLowerCase() === item.name.toLowerCase());
-  if (existing) return existing;
+
+  if (existing) {
+    // Products created before this fix may not have an income account.
+    // Patch those products so Wave can use them on invoices.
+    if (!existing.incomeAccount?.id) {
+      const patch = `mutation ($input: ProductPatchInput!) {
+        productPatch(input: $input) {
+          didSucceed
+          inputErrors { message code path }
+          product { id name unitPrice incomeAccount { id name } }
+        }
+      }`;
+      const patched = await wave(patch, {
+        input: { id: existing.id, incomeAccountId }
+      });
+      const out = patched.productPatch;
+      if (!out.didSucceed) {
+        throw new Error(out.inputErrors?.map(e => e.message).join("; ") || `Could not set income account for Wave product ${item.name}.`);
+      }
+      return out.product;
+    }
+    return existing;
+  }
 
   const m = `mutation ($input: ProductCreateInput!) {
     productCreate(input: $input) {
       didSucceed
       inputErrors { message code path }
-      product { id name unitPrice }
+      product { id name unitPrice incomeAccount { id name } }
     }
   }`;
   const created = await wave(m, {
@@ -119,7 +177,8 @@ async function findOrCreateProduct(item) {
       businessId: process.env.WAVE_BUSINESS_ID,
       name: item.name,
       unitPrice: money(item.price),
-      description: "Kendis Kitchen menu item"
+      description: "Kendis Kitchen menu item",
+      incomeAccountId
     }
   });
   const out = created.productCreate;
