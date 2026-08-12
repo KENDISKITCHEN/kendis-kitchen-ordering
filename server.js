@@ -98,7 +98,7 @@ async function findOrCreateProduct(item) {
   const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
     business(id: $businessId) {
       products(page: $page, pageSize: $pageSize, isArchived: false) {
-        edges { node { id name unitPrice { value } } }
+        edges { node { id name unitPrice }
       }
     }
   }`;
