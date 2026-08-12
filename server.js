@@ -221,6 +221,6 @@ app.post("/api/order", async (req, res) => {
   }
 });
 
-app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.use((req, res) => { res.sendFile(path.join(__dirname, 'public', 'index.html'));});
 
 app.listen(PORT, () => console.log(`Kendis Kitchen order app running on port ${PORT}`));
