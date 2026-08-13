@@ -1,16 +1,69 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
-app.use(express.static(path.join(__dirname, "public")));
-
 const PORT = process.env.PORT || 10000;
 const WAVE_ENDPOINT = "https://gql.waveapps.com/graphql/public";
+
+// Wave webhook must receive the exact raw request body for signature verification.
+app.post("/api/wave-webhook", express.raw({ type: "application/json", limit: "1mb" }), async (req, res) => {
+  try {
+    const secret = process.env.WAVE_WEBHOOK_SECRET;
+    if (!secret) return res.status(500).send("Webhook secret is not configured.");
+
+    const signatureHeader = req.get("x-wave-signature") || "";
+    const timestampHeader = req.get("x-wave-timestamp") || "";
+    const parts = Object.fromEntries(
+      signatureHeader.split(",").map(part => part.split("=")).filter(pair => pair.length === 2)
+    );
+    const timestamp = parts.t || timestampHeader;
+    const receivedSignature = parts.v1;
+
+    if (!timestamp || !receivedSignature) return res.status(400).send("Invalid webhook signature.");
+
+    const timestampNumber = Number(timestamp);
+    if (!Number.isFinite(timestampNumber) || Math.abs(Date.now() / 1000 - timestampNumber) > 300) {
+      return res.status(400).send("Webhook timestamp outside tolerance window.");
+    }
+
+    const rawBody = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body || "");
+    const signedPayload = `${timestamp}.${rawBody}`;
+    const expectedSignature = crypto
+      .createHmac("sha256", secret)
+      .update(signedPayload, "utf8")
+      .digest("hex");
+
+    const received = Buffer.from(receivedSignature, "utf8");
+    const expected = Buffer.from(expectedSignature, "utf8");
+    if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) {
+      return res.status(401).send("Invalid webhook signature.");
+    }
+
+    const event = JSON.parse(rawBody);
+    console.log("Wave webhook received:", {
+      eventType: event.event_type,
+      eventId: event.event_id,
+      invoiceId: event.data?.invoice_id,
+      amountPaid: event.data?.amount_paid,
+      remainingBalance: event.data?.remaining_balance
+    });
+
+    // Payment status is verified against Wave by /api/invoice-status.
+    // The webhook is intentionally acknowledged quickly so Wave does not retry it unnecessarily.
+    return res.sendStatus(200);
+  } catch (e) {
+    console.error("Wave webhook error:", e);
+    return res.status(400).send("Invalid webhook payload.");
+  }
+});
+
+app.use(express.json({ limit: "1mb" }));
+app.use(express.static(path.join(__dirname, "public")));
 
 const MENU = [
   ["Jollof Rice Full Tray",80],["Jollof Rice Half Tray",50],
@@ -95,16 +148,12 @@ async function createCustomer(customer) {
 }
 
 async function findIncomeAccount() {
-  // Use the account explicitly configured in Render when available.
-  // Otherwise, automatically use the first active INCOME account in Wave.
   if (process.env.WAVE_INCOME_ACCOUNT_ID) return process.env.WAVE_INCOME_ACCOUNT_ID;
 
   const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
     business(id: $businessId) {
       accounts(page: $page, pageSize: $pageSize, subtypes: [INCOME, OTHER_INCOME]) {
-        edges {
-          node { id name isArchived subtype { value } }
-        }
+        edges { node { id name isArchived subtype { value } } }
       }
     }
   }`;
@@ -113,38 +162,24 @@ async function findIncomeAccount() {
     page: 1,
     pageSize: 50
   });
-  const account = data.business?.accounts?.edges?.map(e => e.node)
-    .find(a => !a.isArchived);
-  if (!account) {
-    throw new Error(
-      "No active Wave income account was found. Add WAVE_INCOME_ACCOUNT_ID in Render Environment, using an account with subtype INCOME or OTHER_INCOME."
-    );
-  }
+  const account = data.business?.accounts?.edges?.map(e => e.node).find(a => !a.isArchived);
+  if (!account) throw new Error("No active Wave income account was found. Add WAVE_INCOME_ACCOUNT_ID in Render Environment.");
   return account.id;
 }
 
 async function findOrCreateProduct(item) {
   const incomeAccountId = await findIncomeAccount();
-
   const q = `query ($businessId: ID!, $page: Int!, $pageSize: Int!) {
     business(id: $businessId) {
       products(page: $page, pageSize: $pageSize, isArchived: false) {
-        edges {
-          node {
-            id name unitPrice
-            incomeAccount { id name }
-          }
-        }
+        edges { node { id name unitPrice incomeAccount { id name } } }
       }
     }
   }`;
   const data = await wave(q, { businessId: process.env.WAVE_BUSINESS_ID, page: 1, pageSize: 100 });
-  const existing = data.business?.products?.edges?.map(e => e.node)
-    .find(p => p.name.toLowerCase() === item.name.toLowerCase());
+  const existing = data.business?.products?.edges?.map(e => e.node).find(p => p.name.toLowerCase() === item.name.toLowerCase());
 
   if (existing) {
-    // Products created before this fix may not have an income account.
-    // Patch those products so Wave can use them on invoices.
     if (!existing.incomeAccount?.id) {
       const patch = `mutation ($input: ProductPatchInput!) {
         productPatch(input: $input) {
@@ -153,13 +188,9 @@ async function findOrCreateProduct(item) {
           product { id name unitPrice incomeAccount { id name } }
         }
       }`;
-      const patched = await wave(patch, {
-        input: { id: existing.id, incomeAccountId }
-      });
+      const patched = await wave(patch, { input: { id: existing.id, incomeAccountId } });
       const out = patched.productPatch;
-      if (!out.didSucceed) {
-        throw new Error(out.inputErrors?.map(e => e.message).join("; ") || `Could not set income account for Wave product ${item.name}.`);
-      }
+      if (!out.didSucceed) throw new Error(out.inputErrors?.map(e => e.message).join("; ") || `Could not set income account for Wave product ${item.name}.`);
       return out.product;
     }
     return existing;
@@ -186,7 +217,55 @@ async function findOrCreateProduct(item) {
   return out.product;
 }
 
+async function getInvoice(invoiceId) {
+  const q = `query ($businessId: ID!, $invoiceId: ID!) {
+    business(id: $businessId) {
+      invoice(id: $invoiceId) {
+        id
+        invoiceNumber
+        viewUrl
+        status
+        amountDue { value currency { symbol code } }
+        amountPaid { value currency { symbol code } }
+        total { value currency { symbol code } }
+      }
+    }
+  }`;
+  const data = await wave(q, {
+    businessId: process.env.WAVE_BUSINESS_ID,
+    invoiceId
+  });
+  return data.business?.invoice || null;
+}
+
 app.get("/api/menu", (_req, res) => res.json(MENU));
+
+app.get("/api/invoice-status", async (req, res) => {
+  try {
+    const invoiceId = String(req.query.invoiceId || "").trim();
+    if (!invoiceId) return res.status(400).json({ error: "invoiceId is required." });
+    const invoice = await getInvoice(invoiceId);
+    if (!invoice) return res.status(404).json({ error: "Invoice not found." });
+
+    const total = Number(invoice.total?.value || 0);
+    const amountPaid = Number(invoice.amountPaid?.value || 0);
+    const amountDue = Number(invoice.amountDue?.value || 0);
+    const paid = invoice.status === "PAID" || (total > 0 && amountDue <= 0 && amountPaid >= total);
+
+    res.json({
+      paid,
+      status: invoice.status,
+      invoiceNumber: invoice.invoiceNumber,
+      total,
+      amountPaid,
+      amountDue,
+      invoiceUrl: invoice.viewUrl
+    });
+  } catch (e) {
+    console.error("Invoice status error:", e);
+    res.status(500).json({ error: e.message || "Could not retrieve invoice status." });
+  }
+});
 
 app.post("/api/order", async (req, res) => {
   try {
@@ -214,15 +293,11 @@ app.post("/api/order", async (req, res) => {
     const invoiceItems = [];
     for (const item of normalized) {
       const product = await findOrCreateProduct(item);
-      invoiceItems.push({
-        productId: product.id,
-        quantity: String(item.quantity),
-        unitPrice: money(item.price)
-      });
+      invoiceItems.push({ productId: product.id, quantity: String(item.quantity), unitPrice: money(item.price) });
     }
 
     const memo = [
-      `Kendis Kitchen online order`,
+      "Kendis Kitchen online order",
       `Pickup: ${pickupDate} at ${pickupTime}`,
       notes ? `Customer notes: ${notes}` : ""
     ].filter(Boolean).join("\n");
@@ -241,6 +316,7 @@ app.post("/api/order", async (req, res) => {
           disableAmexPayments
           total { value currency { symbol } }
           amountDue { value currency { symbol } }
+          amountPaid { value currency { symbol } }
         }
       }
     }`;
@@ -252,7 +328,6 @@ app.post("/api/order", async (req, res) => {
         status: "SAVED",
         items: invoiceItems,
         memo,
-        // Allow the invoice to use the payment methods enabled for Kendis Kitchen in Wave.
         disableBankPayments: false,
         disableCreditCardPayments: false,
         disableAmexPayments: false,
@@ -266,7 +341,7 @@ app.post("/api/order", async (req, res) => {
     }
 
     const eventTitle = `Kendis Kitchen Order ${invoice.invoiceNumber || ""}`.trim();
-    const details = `Kendis Kitchen order\\nWave invoice: ${invoice.viewUrl}\\nTotal: $${money(subtotal)}\\n${normalized.map(i => `${i.quantity} × ${i.name}`).join("\\n")}${notes ? `\\nNotes: ${notes}` : ""}`;
+    const details = `Kendis Kitchen order\nWave invoice: ${invoice.viewUrl}\nTotal: $${money(subtotal)}\n${normalized.map(i => `${i.quantity} × ${i.name}`).join("\n")}${notes ? `\nNotes: ${notes}` : ""}`;
     const start = `${pickupDate.replaceAll("-", "")}T${pickupTime.replace(":", "")}00`;
     const calendarUrl =
       "https://calendar.google.com/calendar/render?action=TEMPLATE" +
@@ -275,6 +350,7 @@ app.post("/api/order", async (req, res) => {
       `&details=${encodeURIComponent(details)}`;
 
     res.json({
+      invoiceId: invoice.id,
       invoiceUrl: invoice.viewUrl,
       invoiceNumber: invoice.invoiceNumber,
       total: subtotal,
@@ -287,7 +363,7 @@ app.post("/api/order", async (req, res) => {
   }
 });
 
-app.use((req, res) => { res.sendFile(path.join(__dirname, 'index.html')); });
+app.use((req, res) => { res.sendFile(path.join(__dirname, "index.html")); });
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Kendis Kitchen order app running on port ${PORT}`);
