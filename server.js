@@ -9,6 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const WAVE_ENDPOINT = "https://gql.waveapps.com/graphql/public";
 const processedPaymentEvents = new Set();
+const receiptSentInvoices = new Set();
+const receiptInFlight = new Map();
 
 const MENU = [
   ["Rice & Sides","Jollof Rice Full Tray",80],["Rice & Sides","Jollof Rice Half Tray",50],
@@ -122,6 +124,22 @@ async function sendPaymentReceipt(invoiceId){
   return true;
 }
 
+async function sendPaymentReceiptOnce(invoiceId){
+  if(receiptSentInvoices.has(invoiceId)) return true;
+  if(receiptInFlight.has(invoiceId)) return receiptInFlight.get(invoiceId);
+  const promise=(async()=>{
+    try{
+      const sent=await sendPaymentReceipt(invoiceId);
+      if(sent) receiptSentInvoices.add(invoiceId);
+      return sent;
+    }finally{
+      receiptInFlight.delete(invoiceId);
+    }
+  })();
+  receiptInFlight.set(invoiceId,promise);
+  return promise;
+}
+
 app.post("/api/wave-webhook",express.raw({type:"application/json",limit:"1mb"}),async(req,res)=>{
   try{
     const secret=process.env.WAVE_WEBHOOK_SECRET;
@@ -141,10 +159,12 @@ app.post("/api/wave-webhook",express.raw({type:"application/json",limit:"1mb"}),
     const event=JSON.parse(rawBody);
     console.log("Wave webhook received:",{eventType:event.event_type,eventId:event.event_id,invoiceId:event.data?.invoice_id,amountPaid:event.data?.amount_paid,remainingBalance:event.data?.remaining_balance});
     if(event.event_type==="invoice.paid"&&event.data?.invoice_id){
-      const key=event.event_id||event.data.invoice_id;
+      const invoiceId=event.data.invoice_id;
+      const key=event.event_id||invoiceId;
       if(!processedPaymentEvents.has(key)){
+        const receiptSent=await sendPaymentReceiptOnce(invoiceId);
+        if(!receiptSent) return res.status(500).send("Payment received, but receipt email could not be queued. Please retry webhook delivery.");
         processedPaymentEvents.add(key);
-        try{ await sendPaymentReceipt(event.data.invoice_id); }catch(error){ console.error("Payment receipt processing error:",error); }
         if(processedPaymentEvents.size>1000) processedPaymentEvents.delete(processedPaymentEvents.values().next().value);
       }
     }
@@ -167,11 +187,7 @@ app.get("/api/invoice-status",async(req,res)=>{
     const paid=invoice.status==="PAID"||(total>0&&amountDue<=0&&amountPaid>=total);
     let receiptSent=false;
     if(paid){
-      const key=`poll:${invoiceId}`;
-      if(!processedPaymentEvents.has(key)){
-        processedPaymentEvents.add(key);
-        try{ receiptSent=await sendPaymentReceipt(invoiceId); }catch(error){ console.error("Fallback receipt error:",error); }
-      }else receiptSent=true;
+      receiptSent=await sendPaymentReceiptOnce(invoiceId);
     }
     res.json({paid,status:invoice.status,invoiceNumber:invoice.invoiceNumber,total,amountPaid,amountDue,invoiceUrl:invoice.viewUrl,receiptSent});
   }catch(e){ console.error("Invoice status error:",e); res.status(500).json({error:e.message||"Could not retrieve invoice status."}); }
