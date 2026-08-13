@@ -1,20 +1,30 @@
 # Kendis Kitchen Online Ordering App
 
-This app is designed for Kendis Kitchen and uses the Wave API instead of Stripe.
+This app is designed for Kendis Kitchen and uses the Wave API for customers, products, invoices, payments, and payment receipts.
 
 ## What it does
-- Shows the Kendis Kitchen menu and prices.
+- Shows the Kendis Kitchen menu with categories.
 - Lets customers select quantities.
 - Collects customer name, email, phone, pickup date/time, and notes.
 - Creates/uses a customer in Wave.
 - Creates menu products in Wave when needed.
 - Creates a Wave invoice for the order.
-- Disables bank payments on the invoice and leaves card payments enabled.
+- Leaves Wave bank and card payment options enabled according to the invoice settings.
 - Sends the customer to Wave's hosted invoice/payment page.
+- Detects payment status from Wave.
+- Sends a Wave payment receipt to the customer's email after the invoice is paid, with the receipt PDF attached when supported by the Wave business email settings.
 - Gives the customer a Google Calendar "Add to Google Calendar" link for the pickup appointment.
 
+## Menu categories
+The online menu is organized into:
+- Rice & Sides
+- Meat & Chicken
+- Soups & Stews
+- Swallows
+- Small Chops & Snacks
+
 ## Important debit-card limitation
-Wave's public API exposes a `disableCreditCardPayments` setting, but it does not expose a separate "debit card only" setting. Therefore the app cannot technically distinguish or enforce debit vs. credit cards. The page clearly requests debit-card payment, while the Wave invoice handles the actual card payment.
+Wave's public API exposes a `disableCreditCardPayments` setting, but it does not expose a separate "debit card only" setting. Therefore the app cannot technically distinguish or enforce debit vs. credit cards. The Wave invoice handles the actual card payment.
 
 ## Deploy on Render
 1. Put these files in a GitHub repository.
@@ -25,12 +35,21 @@ Wave's public API exposes a `disableCreditCardPayments` setting, but it does not
 6. Add environment variables:
    - `WAVE_ACCESS_TOKEN` = your Wave application access token
    - `WAVE_BUSINESS_ID` = the Kendis Kitchen Wave business ID
+   - `WAVE_WEBHOOK_SECRET` = the signing secret for the Wave webhook
+   - `WAVE_INCOME_ACCOUNT_ID` = optional; use this if you want to explicitly control the Wave income account used for menu products
 7. Deploy.
 
-Do NOT put the Wave access token in GitHub or in the browser code.
+Do NOT put the Wave access token or webhook secret in GitHub or in browser code.
 
 ## Wave setup
-Your Wave Developer application needs access to the relevant resources. For this app, the token must be able to read/write customers, products, and invoices. Wave's current API is GraphQL and uses the endpoint documented in its developer portal.
+The Wave Developer application needs access to the relevant resources. For this app, the token must be able to read/write customers, products, and invoices. The app also uses Wave's `invoice.paid` webhook event so it can trigger a payment receipt when an invoice is paid. Wave documents `invoice.paid` as a supported webhook event and provides the `invoicePaymentReceiptSend` mutation for sending an invoice payment receipt. The Wave business must have its email-sending capability enabled for Wave email features to work.
+
+Webhook endpoint:
+`https://YOUR-RENDER-URL.onrender.com/api/wave-webhook`
+
+In Wave Webhooks, enable at least:
+- `invoice.paid`
+- `invoice.partially_paid` (optional if you later want partial-payment emails)
 
 ## Google Calendar
 The app uses a Google Calendar event-creation URL, so customers can add the pickup to their own calendar without giving the website access to their Google account. This is simpler and safer than storing a Google OAuth credential.
