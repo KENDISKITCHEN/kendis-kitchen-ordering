@@ -232,7 +232,13 @@ app.post("/api/order", async (req, res) => {
         didSucceed
         inputErrors { message code path }
         invoice {
-          id invoiceNumber viewUrl
+          id
+          invoiceNumber
+          viewUrl
+          status
+          disableCreditCardPayments
+          disableBankPayments
+          disableAmexPayments
           total { value currency { symbol } }
           amountDue { value currency { symbol } }
         }
@@ -246,10 +252,11 @@ app.post("/api/order", async (req, res) => {
         status: "SAVED",
         items: invoiceItems,
         memo,
-        // Keep bank payments disabled. Wave's card setting controls card payments.
-        disableBankPayments: true,
+        // Allow the invoice to use the payment methods enabled for Kendis Kitchen in Wave.
+        disableBankPayments: false,
         disableCreditCardPayments: false,
-        requireTermsOfServiceAgreement: true
+        disableAmexPayments: false,
+        requireTermsOfServiceAgreement: false
       }
     });
 
@@ -272,7 +279,7 @@ app.post("/api/order", async (req, res) => {
       invoiceNumber: invoice.invoiceNumber,
       total: subtotal,
       calendarUrl,
-      message: "Order created in Wave. Open the Wave invoice to pay by card."
+      message: "Order created in Wave. Use the Pay Now button on the hosted Wave invoice to complete payment."
     });
   } catch (e) {
     console.error(e);
