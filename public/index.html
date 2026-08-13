@@ -47,9 +47,9 @@ a.btn{display:inline-block;padding:12px 15px;border-radius:9px;text-decoration:n
 <div class="field"><label>Pickup Time *</label><input id="time" type="time" required></div>
 </div>
 <div class="field"><label>Order Notes</label><textarea id="notes" rows="3" placeholder="Allergies, special instructions, etc."></textarea></div>
-<div class="notice"><strong>Payment:</strong> Your order will create a Wave invoice. Payment is completed on Wave's secure hosted invoice page. This version disables bank payments and leaves card payments enabled.</div>
+<div class="notice"><strong>Payment:</strong> Your order will create a Wave invoice. Payment is completed on Wave's secure hosted invoice page. Card and bank payment availability is controlled by your Wave invoice settings.</div>
 <div class="notice small"><strong>Debit-card request:</strong> Kendis Kitchen requests debit-card payment. Wave's public API exposes a card-payment setting, but does not provide a separate debit-vs-credit switch, so the website cannot technically enforce debit-only card use.</div>
-<button class="submit" type="submit">Place Order & Continue to Payment</button>
+<button class="submit" type="submit">Place Order & Pay</button>
 </form>
 <div id="result" class="notice hidden"></div>
 </section>
@@ -90,11 +90,11 @@ document.getElementById("orderForm").addEventListener("submit",async e=>{
   const data=await r.json();if(!r.ok)throw new Error(data.error||"Order failed.");
   const result=document.getElementById("result");result.classList.remove("hidden");
   result.innerHTML=`<strong>Order created!</strong><br>Wave invoice ${data.invoiceNumber||""} — $${money(data.total)}<br>
-  <a class="btn" href="${data.invoiceUrl}" target="_blank" rel="noopener">Open Wave Payment</a>
+  <a class="btn" href="${data.invoiceUrl}" target="_blank" rel="noopener">💳 Pay Now on Wave</a>
   <a class="btn" href="${data.calendarUrl}" target="_blank" rel="noopener">Add to Google Calendar</a>`;
   result.scrollIntoView({behavior:"smooth"});
  }catch(err){alert(err.message)}
- finally{btn.disabled=false;btn.textContent="Place Order & Continue to Payment";}
+ finally{btn.disabled=false;btn.textContent="Place Order & Pay";}
 });
 </script>
 </body>
