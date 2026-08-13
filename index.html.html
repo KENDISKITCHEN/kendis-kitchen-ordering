@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kendis Kitchen — Order Online</title>
+<style>
+:root{--green:#153d2b;--gold:#d5a928;--cream:#fffaf0;--ink:#202020;--paid:#176b3a}
+*{box-sizing:border-box}body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--cream);color:var(--ink)}
+header{background:var(--green);color:white;padding:34px 18px;text-align:center}header h1{margin:0;font-size:42px}header p{margin:8px 0 0}
+main{max-width:1100px;margin:30px auto;padding:0 18px}.grid{display:grid;grid-template-columns:1.5fr 1fr;gap:24px}
+.card{background:white;border-radius:16px;padding:22px;box-shadow:0 6px 22px #00000012}.menu{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.item{border:1px solid #ddd;border-radius:12px;padding:14px;display:flex;justify-content:space-between;gap:10px;align-items:center}.item button{border:0;border-radius:8px;background:var(--green);color:white;padding:8px 12px;cursor:pointer}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field{margin:10px 0}.field label{display:block;font-weight:700;margin-bottom:6px}
+input,textarea{width:100%;padding:11px;border:1px solid #ccc;border-radius:8px;font:inherit}.cart-row{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:9px 0;gap:10px}
+.total{font-size:22px;font-weight:700;margin-top:14px}.submit{width:100%;padding:14px;border:0;border-radius:10px;background:var(--gold);font-weight:800;cursor:pointer;margin-top:14px}.submit:disabled{opacity:.65;cursor:not-allowed}
+.notice{margin-top:12px;padding:12px;border-radius:10px;background:#f5f5f5}.hidden{display:none}.status-pending{border-left:5px solid var(--gold)}.status-paid{border-left:5px solid var(--paid);background:#eef9f1}
+a.btn{display:inline-block;padding:12px 15px;border-radius:9px;text-decoration:none;background:var(--green);color:#fff;margin:5px 5px 0 0}.small{font-size:13px;color:#555}
+@media(max-width:800px){.grid{grid-template-columns:1fr}.menu{grid-template-columns:1fr}.row{grid-template-columns:1fr}header h1{font-size:32px}}
+</style>
+</head>
+<body>
+<header><h1>Kendis Kitchen</h1><p>African Cuisine • Order Online</p></header>
+<main><div class="grid">
+<section class="card"><h2>Choose Your Menu</h2><div id="menu" class="menu"></div></section>
+<section class="card">
+<h2>Your Order</h2><div id="cart"><p class="small">No items added yet.</p></div>
+<div class="total">Total: $<span id="total">0.00</span></div><hr>
+<h2>Customer Details</h2>
+<form id="orderForm">
+<div class="field"><label>Full Name *</label><input id="name" required></div>
+<div class="field"><label>Email *</label><input id="email" type="email" required></div>
+<div class="field"><label>Phone</label><input id="phone" type="tel"></div>
+<div class="row"><div class="field"><label>Pickup Date *</label><input id="date" type="date" required></div>
+<div class="field"><label>Pickup Time *</label><input id="time" type="time" required></div></div>
+<div class="field"><label>Order Notes</label><textarea id="notes" rows="3" placeholder="Allergies, special instructions, etc."></textarea></div>
+<div class="notice"><strong>Payment:</strong> Your order will create a Wave invoice. Payment is completed on Wave's secure hosted invoice page.</div>
+<button class="submit" type="submit">Place Order &amp; Pay</button>
+</form>
+<div id="result" class="notice hidden"></div>
+</section></div></main>
+<script>
+const menuEl=document.getElementById("menu"),cartEl=document.getElementById("cart"),totalEl=document.getElementById("total"),form=document.getElementById("orderForm"),result=document.getElementById("result");
+let menu=[],cart={},pollTimer=null,pollStarted=0,orderSubmitted=false;
+const money=n=>Number(n).toFixed(2);
+const esc=v=>String(v??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
+function safeUrl(v){try{const u=new URL(v,location.origin);return["https:","http:"].includes(u.protocol)?u.href:"#"}catch{return"#"}}
+fetch("/api/menu").then(r=>r.ok?r.json():Promise.reject(new Error("Could not load the menu."))).then(d=>{menu=d;renderMenu()}).catch(e=>menuEl.innerHTML='<div class="notice">'+esc(e.message)+'</div>');
+function renderMenu(){menuEl.innerHTML=menu.map((x,i)=>'<div class="item"><div><strong>'+esc(x.name)+'</strong><br><span>$'+money(x.price)+'</span></div><button type="button" onclick="add('+i+')">Add</button></div>').join("")}
+function add(i){const x=menu[i];cart[x.name]=(cart[x.name]||0)+1;renderCart()}
+function remove(name){cart[name]--;if(cart[name]<=0)delete cart[name];renderCart()}
+function renderCart(){const es=Object.entries(cart);if(!es.length){cartEl.innerHTML='<p class="small">No items added yet.</p>';totalEl.textContent="0.00";return}let total=0;cartEl.innerHTML=es.map(([n,q])=>{const x=menu.find(m=>m.name===n);total+=x.price*q;return '<div class="cart-row"><span>'+q+' × '+esc(n)+'</span><span>$'+money(x.price*q)+' <button type="button" onclick="remove('+JSON.stringify(n)+')">−</button></span></div>'}).join("");totalEl.textContent=money(total)}
+form.addEventListener("submit",async e=>{
+ e.preventDefault();if(orderSubmitted)return;if(!Object.keys(cart).length){alert("Please add at least one menu item.");return}
+ const btn=e.target.querySelector('button[type="submit"]');btn.disabled=true;btn.textContent="Creating Wave invoice…";
+ const payload={customer:{name:document.getElementById("name").value.trim(),email:document.getElementById("email").value.trim(),phone:document.getElementById("phone").value.trim()},pickupDate:document.getElementById("date").value,pickupTime:document.getElementById("time").value,notes:document.getElementById("notes").value.trim(),items:Object.entries(cart).map(([name,quantity])=>({name,quantity}))};
+ try{const r=await fetch("/api/order",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}),d=await r.json();if(!r.ok)throw new Error(d.error||"Order failed.");
+ orderSubmitted=true;form.querySelectorAll("input,textarea,button").forEach(x=>x.disabled=true);result.className="notice status-pending";result.classList.remove("hidden");
+ result.innerHTML='<strong>Order Submitted — Payment Required</strong><br>Wave invoice <strong>'+esc(d.invoiceNumber||"")+'</strong> — <strong>$'+money(d.total)+'</strong><br><strong>Payment Status:</strong> <span id="paymentStatus">Awaiting Payment</span><br><span class="small">Complete payment on Wave. This page will automatically check for confirmation.</span><br><a class="btn" href="'+safeUrl(d.invoiceUrl)+'" target="_blank" rel="noopener noreferrer">Open Wave Payment</a><a class="btn" href="'+safeUrl(d.calendarUrl)+'" target="_blank" rel="noopener noreferrer">Add to Google Calendar</a>';
+ result.scrollIntoView({behavior:"smooth"});if(d.invoiceId)startPolling(d.invoiceId,d.invoiceNumber,d.total);
+ }catch(err){alert(err.message);btn.disabled=false;btn.textContent="Place Order & Pay"}
+});
+function startPolling(id,num,total){stopPolling();pollStarted=Date.now();const check=async()=>{try{const r=await fetch("/api/invoice-status?invoiceId="+encodeURIComponent(id),{cache:"no-store"}),d=await r.json();if(!r.ok)throw new Error(d.error||"Status check failed.");
+ if(d.paid){result.className="notice status-paid";result.innerHTML='<strong>✓ Payment Confirmed!</strong><br>Wave invoice <strong>'+esc(d.invoiceNumber||num||"")+'</strong> — <strong>$'+money(d.amountPaid||total)+'</strong><br><strong>Payment Status:</strong> Paid<br><span class="small">Your payment has been confirmed by Wave.</span>';stopPolling();return}
+ const s=document.getElementById("paymentStatus");if(s)s.textContent=d.status==="PARTIALLY_PAID"?"Partially Paid — $"+money(d.amountPaid)+" received; $"+money(d.amountDue)+" remaining":"Awaiting Payment";
+ if(Date.now()-pollStarted>=900000)stopPolling();
+ }catch(err){console.error("Payment status check:",err)}};check();pollTimer=setInterval(check,5000)}
+function stopPolling(){if(pollTimer){clearInterval(pollTimer);pollTimer=null}}
+</script>
+</body>
+</html>
