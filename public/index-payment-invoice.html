@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kendis Kitchen — Order Online</title>
+<style>
+:root{--green:#153d2b;--gold:#d5a928;--cream:#fffaf0;--ink:#202020;--muted:#666}
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--cream);color:var(--ink)}
+header{background:var(--green);color:white;padding:34px 18px;text-align:center}
+header h1{margin:0;font-size:42px}
+header p{margin:8px 0 0}
+main{max-width:1100px;margin:30px auto;padding:0 18px}
+.grid{display:grid;grid-template-columns:1.5fr 1fr;gap:24px}
+.card{background:white;border-radius:16px;padding:22px;box-shadow:0 6px 22px #00000012}
+.menu{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.item{border:1px solid #ddd;border-radius:12px;padding:14px;display:flex;justify-content:space-between;gap:10px;align-items:center}
+.item button{border:0;border-radius:8px;background:var(--green);color:white;padding:8px 12px;cursor:pointer}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field{margin:10px 0}
+.field label{display:block;font-weight:700;margin-bottom:6px}
+input,textarea,select{width:100%;padding:11px;border:1px solid #ccc;border-radius:8px;font:inherit}
+.cart-row{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:9px 0}
+.total{font-size:22px;font-weight:700;margin-top:14px}
+.submit{width:100%;padding:14px;border:0;border-radius:10px;background:var(--gold);font-weight:800;cursor:pointer;margin-top:14px}
+.notice{margin-top:12px;padding:12px;border-radius:10px;background:#f5f5f5}
+.hidden{display:none}
+.small{font-size:13px;color:#555}
+
+/* Customer invoice / payment page */
+.invoice-wrap{max-width:760px;margin:30px auto}
+.invoice-card{background:#fff;border-radius:18px;box-shadow:0 8px 30px #00000015;overflow:hidden}
+.invoice-head{background:var(--green);color:#fff;padding:30px;text-align:center}
+.invoice-head h2{margin:0 0 8px;font-size:30px}
+.invoice-body{padding:30px}
+.invoice-meta{display:grid;grid-template-columns:1fr 1fr;gap:20px;border-bottom:1px solid #eee;padding-bottom:20px}
+.meta-label{font-size:12px;text-transform:uppercase;color:var(--muted);font-weight:700}
+.meta-value{font-size:16px;font-weight:700;margin-top:5px}
+.invoice-total{text-align:center;padding:28px 10px}
+.invoice-total .label{font-size:14px;color:var(--muted)}
+.invoice-total .amount{font-size:42px;font-weight:800;margin-top:5px}
+.payment-box{background:#f7f9f8;border:1px solid #dfe6e2;border-radius:14px;padding:22px;text-align:center}
+.payment-box h3{margin:0 0 8px}
+.payment-box p{color:var(--muted);margin:8px 0 18px}
+.pay-btn{display:block;width:100%;padding:16px 20px;border:0;border-radius:11px;background:#14532d;color:#fff;text-decoration:none;font-size:18px;font-weight:800;cursor:pointer}
+.pay-btn:hover{filter:brightness(.95)}
+.calendar-btn{display:inline-block;margin-top:12px;padding:12px 18px;border:2px solid var(--green);border-radius:10px;color:var(--green);text-decoration:none;font-weight:700}
+.invoice-note{text-align:center;color:var(--muted);font-size:13px;margin-top:18px}
+.back-btn{display:inline-block;margin-top:20px;color:var(--green);font-weight:700;text-decoration:none;cursor:pointer}
+
+@media(max-width:800px){
+ .grid{grid-template-columns:1fr}
+ .menu{grid-template-columns:1fr}
+ .row{grid-template-columns:1fr}
+ header h1{font-size:32px}
+ .invoice-meta{grid-template-columns:1fr}
+ .invoice-body{padding:22px}
+}
+</style>
+</head>
+<body>
+<header><h1>Kendis Kitchen</h1><p>African Cuisine • Order Online</p></header>
+
+<main>
+<div id="orderArea" class="grid">
+<section class="card">
+<h2>Choose Your Menu</h2>
+<div id="menu" class="menu"></div>
+</section>
+
+<section class="card">
+<h2>Your Order</h2>
+<div id="cart"><p class="small">No items added yet.</p></div>
+<div class="total">Total: $<span id="total">0.00</span></div>
+<hr>
+
+<h2>Customer Details</h2>
+<form id="orderForm">
+<div class="field"><label>Full Name *</label><input id="name" required></div>
+<div class="field"><label>Email *</label><input id="email" type="email" required></div>
+<div class="field"><label>Phone</label><input id="phone" type="tel"></div>
+
+<div class="row">
+<div class="field"><label>Pickup Date *</label><input id="date" type="date" required></div>
+<div class="field"><label>Pickup Time *</label><input id="time" type="time" required></div>
+</div>
+
+<div class="field">
+<label>Order Notes</label>
+<textarea id="notes" rows="3" placeholder="Allergies, special instructions, etc."></textarea>
+</div>
+
+<div class="notice">
+<strong>Payment:</strong> After your order is submitted, you will receive a secure Kendis Kitchen invoice with a payment button. Payment is processed securely by Wave.
+</div>
+
+<button class="submit" type="submit">Place Order & Continue to Payment</button>
+</form>
+</section>
+</div>
+
+<div id="invoiceArea" class="invoice-wrap hidden"></div>
+</main>
+
+<script>
+const menuEl=document.getElementById("menu");
+const cartEl=document.getElementById("cart");
+const totalEl=document.getElementById("total");
+const orderArea=document.getElementById("orderArea");
+const invoiceArea=document.getElementById("invoiceArea");
+
+let menu=[],cart={};
+
+const money=n=>Number(n).toFixed(2);
+
+fetch("/api/menu")
+ .then(r=>r.json())
+ .then(data=>{menu=data;renderMenu()})
+ .catch(()=>alert("Unable to load the menu. Please refresh the page."));
+
+function renderMenu(){
+ menuEl.innerHTML=menu.map((x,i)=>`
+   <div class="item">
+     <div><strong>${x.name}</strong><br><span>$${money(x.price)}</span></div>
+     <button type="button" onclick="add(${i})">Add</button>
+   </div>
+ `).join("");
+}
+
+function add(i){
+ const x=menu[i];
+ cart[x.name]=(cart[x.name]||0)+1;
+ renderCart();
+}
+
+function remove(name){
+ cart[name]--;
+ if(cart[name]<=0)delete cart[name];
+ renderCart();
+}
+
+function renderCart(){
+ const entries=Object.entries(cart);
+
+ if(!entries.length){
+   cartEl.innerHTML='<p class="small">No items added yet.</p>';
+   totalEl.textContent="0.00";
+   return;
+ }
+
+ let total=0;
+
+ cartEl.innerHTML=entries.map(([name,q])=>{
+   const x=menu.find(m=>m.name===name);
+   total+=x.price*q;
+
+   return `<div class="cart-row">
+     <span>${q} × ${name}</span>
+     <span>$${money(x.price*q)}
+       <button type="button" onclick="remove('${name.replaceAll("'","&#39;")}')">−</button>
+     </span>
+   </div>`;
+ }).join("");
+
+ totalEl.textContent=money(total);
+}
+
+document.getElementById("orderForm").addEventListener("submit",async e=>{
+ e.preventDefault();
+
+ if(!Object.keys(cart).length){
+   alert("Please add at least one menu item.");
+   return;
+ }
+
+ const payload={
+   customer:{
+     name:document.getElementById("name").value,
+     email:document.getElementById("email").value,
+     phone:document.getElementById("phone").value
+   },
+   pickupDate:document.getElementById("date").value,
+   pickupTime:document.getElementById("time").value,
+   notes:document.getElementById("notes").value,
+   items:Object.entries(cart).map(([name,quantity])=>({name,quantity}))
+ };
+
+ const btn=e.target.querySelector("button[type=submit]");
+ btn.disabled=true;
+ btn.textContent="Creating Invoice…";
+
+ try{
+   const r=await fetch("/api/order",{
+     method:"POST",
+     headers:{"Content-Type":"application/json"},
+     body:JSON.stringify(payload)
+   });
+
+   const data=await r.json();
+
+   if(!r.ok)throw new Error(data.error||"Order failed.");
+
+   const customerName=payload.customer.name;
+   const pickupDate=new Date(payload.pickupDate+"T00:00:00")
+     .toLocaleDateString(undefined,{month:"long",day:"numeric",year:"numeric"});
+
+   invoiceArea.innerHTML=`
+     <div class="invoice-card">
+       <div class="invoice-head">
+         <h2>Kendis Kitchen</h2>
+         <div>Customer Invoice</div>
+       </div>
+
+       <div class="invoice-body">
+         <div class="invoice-meta">
+           <div>
+             <div class="meta-label">Invoice Number</div>
+             <div class="meta-value">#${data.invoiceNumber||"Pending"}</div>
+           </div>
+
+           <div>
+             <div class="meta-label">Customer</div>
+             <div class="meta-value">${escapeHtml(customerName)}</div>
+           </div>
+
+           <div>
+             <div class="meta-label">Pickup Date</div>
+             <div class="meta-value">${pickupDate}</div>
+           </div>
+
+           <div>
+             <div class="meta-label">Pickup Time</div>
+             <div class="meta-value">${escapeHtml(payload.pickupTime)}</div>
+           </div>
+         </div>
+
+         <div class="invoice-total">
+           <div class="label">Amount Due</div>
+           <div class="amount">$${money(data.total)}</div>
+         </div>
+
+         <div class="payment-box">
+           <h3>Complete Your Payment</h3>
+           <p>Your order is ready. Click below to securely pay this invoice.</p>
+
+           <a class="pay-btn"
+              href="${data.invoiceUrl}"
+              target="_blank"
+              rel="noopener noreferrer">
+              💳 Pay Invoice Securely
+           </a>
+
+           <a class="calendar-btn"
+              href="${data.calendarUrl}"
+              target="_blank"
+              rel="noopener noreferrer">
+              Add Pickup to Google Calendar
+           </a>
+         </div>
+
+         <div class="invoice-note">
+           Secure payment is processed by Wave. Your card details are entered only on Wave's secure payment page.
+         </div>
+
+         <div style="text-align:center">
+           <a class="back-btn" onclick="startNewOrder()">← Start a New Order</a>
+         </div>
+       </div>
+     </div>
+   `;
+
+   orderArea.classList.add("hidden");
+   invoiceArea.classList.remove("hidden");
+   window.scrollTo({top:0,behavior:"smooth"});
+
+ }catch(err){
+   alert(err.message);
+ }finally{
+   btn.disabled=false;
+   btn.textContent="Place Order & Continue to Payment";
+ }
+});
+
+function escapeHtml(value){
+ return String(value??"").replace(/[&<>"']/g,ch=>({
+   "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+ }[ch]));
+}
+
+function startNewOrder(){
+ cart={};
+ renderCart();
+ document.getElementById("orderForm").reset();
+ invoiceArea.classList.add("hidden");
+ orderArea.classList.remove("hidden");
+ window.scrollTo({top:0,behavior:"smooth"});
+}
+</script>
+</body>
+</html>
