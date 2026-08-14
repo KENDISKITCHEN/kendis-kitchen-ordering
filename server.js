@@ -11,6 +11,8 @@ const WAVE_ENDPOINT = "https://gql.waveapps.com/graphql/public";
 const processedPaymentEvents = new Set();
 const receiptSentInvoices = new Set();
 const receiptInFlight = new Map();
+const ORDER_STATUSES = ["NEW","CONFIRMED","PREPARING","READY","COMPLETED","CANCELLED"];
+const ADMIN_COOKIE = "kendis_admin";
 
 const MENU = [
   ["Rice & Sides","Jollof Rice Full Tray",80],["Rice & Sides","Jollof Rice Half Tray",50],
@@ -36,191 +38,41 @@ const MENU = [
   ["Small Chops & Snacks","Akara (Beans Cake) Full Tray",120],["Small Chops & Snacks","Akara (Beans Cake) Half Tray",60],
   ["Small Chops & Snacks","Puff-Puff Full Tray",80],["Small Chops & Snacks","Puff-Puff Half Tray",50],
   ["Small Chops & Snacks","Chin-Chin Full Tray",140],["Small Chops & Snacks","Chin-Chin Half Tray",70]
-].map(([category,name,price]) => ({ category, name, price }));
+].map(([category,name,price]) => ({category,name,price}));
 
-function money(n){ return Number(n).toFixed(2); }
-
-async function wave(query, variables){
-  const token = process.env.WAVE_ACCESS_TOKEN;
-  if(!token) throw new Error("WAVE_ACCESS_TOKEN is not configured.");
-  const r = await fetch(WAVE_ENDPOINT, {
-    method:"POST",
-    headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
-    body:JSON.stringify({query,variables})
-  });
-  const body = await r.json();
-  if(!r.ok || body.errors?.length) throw new Error(body.errors?.map(e=>e.message).join("; ") || `Wave API HTTP ${r.status}`);
-  return body.data;
+function money(n){return Number(n).toFixed(2)}
+async function wave(query,variables){
+  const token=process.env.WAVE_ACCESS_TOKEN;if(!token)throw new Error("WAVE_ACCESS_TOKEN is not configured.");
+  const r=await fetch(WAVE_ENDPOINT,{method:"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({query,variables})});
+  const body=await r.json();if(!r.ok||body.errors?.length)throw new Error(body.errors?.map(e=>e.message).join("; ")||`Wave API HTTP ${r.status}`);return body.data;
 }
-
-async function findCustomer(email){
-  const q = `query ($businessId: ID!, $email: String) { business(id:$businessId) { customers(page:1,pageSize:10,email:$email) { edges { node { id name email } } } } }`;
-  const data = await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,email});
-  return data.business?.customers?.edges?.[0]?.node || null;
-}
-
-async function createCustomer(customer){
-  const q = `mutation ($input: CustomerCreateInput!) { customerCreate(input:$input) { didSucceed inputErrors { message code path } customer { id name email } } }`;
-  const data = await wave(q,{input:{businessId:process.env.WAVE_BUSINESS_ID,name:customer.name,email:customer.email,mobile:customer.phone||null}});
-  const out=data.customerCreate;
-  if(!out.didSucceed) throw new Error(out.inputErrors?.map(e=>e.message).join("; ") || "Could not create customer in Wave.");
-  return out.customer;
-}
-
-async function findIncomeAccount(){
-  if(process.env.WAVE_INCOME_ACCOUNT_ID) return process.env.WAVE_INCOME_ACCOUNT_ID;
-  const q=`query ($businessId:ID!,$page:Int!,$pageSize:Int!){ business(id:$businessId){ accounts(page:$page,pageSize:$pageSize,subtypes:[INCOME,OTHER_INCOME]){ edges{node{id name isArchived subtype{value}}} } } }`;
-  const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,page:1,pageSize:50});
-  const account=data.business?.accounts?.edges?.map(e=>e.node).find(a=>!a.isArchived);
-  if(!account) throw new Error("No active Wave income account was found. Add WAVE_INCOME_ACCOUNT_ID in Render Environment.");
-  return account.id;
-}
-
-async function findOrCreateProduct(item){
-  const incomeAccountId=await findIncomeAccount();
-  const q=`query ($businessId:ID!,$page:Int!,$pageSize:Int!){ business(id:$businessId){ products(page:$page,pageSize:$pageSize,isArchived:false){ edges{node{id name unitPrice incomeAccount{id name}}} } } }`;
-  const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,page:1,pageSize:100});
-  const existing=data.business?.products?.edges?.map(e=>e.node).find(p=>p.name.toLowerCase()===item.name.toLowerCase());
-  if(existing){
-    if(!existing.incomeAccount?.id){
-      const patch=`mutation ($input:ProductPatchInput!){ productPatch(input:$input){ didSucceed inputErrors{message code path} product{id name unitPrice incomeAccount{id name}} } }`;
-      const patched=await wave(patch,{input:{id:existing.id,incomeAccountId}});
-      const out=patched.productPatch;
-      if(!out.didSucceed) throw new Error(out.inputErrors?.map(e=>e.message).join("; ") || `Could not set income account for ${item.name}.`);
-      return out.product;
-    }
-    return existing;
-  }
-  const m=`mutation ($input:ProductCreateInput!){ productCreate(input:$input){ didSucceed inputErrors{message code path} product{id name unitPrice incomeAccount{id name}} } }`;
-  const created=await wave(m,{input:{businessId:process.env.WAVE_BUSINESS_ID,name:item.name,unitPrice:money(item.price),description:`Kendis Kitchen menu item — ${item.category}`,incomeAccountId}});
-  const out=created.productCreate;
-  if(!out.didSucceed) throw new Error(out.inputErrors?.map(e=>e.message).join("; ") || `Could not create Wave product ${item.name}.`);
-  return out.product;
-}
-
-async function getInvoice(invoiceId){
-  const q=`query ($businessId:ID!,$invoiceId:ID!){ business(id:$businessId){ invoice(id:$invoiceId){ id invoiceNumber viewUrl status memo customer{name email} payments{id amount paymentDate} amountDue{value currency{symbol code}} amountPaid{value currency{symbol code}} total{value currency{symbol code}} } } }`;
-  const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,invoiceId});
-  return data.business?.invoice || null;
-}
-
-async function sendPaymentReceipt(invoiceId){
-  const invoice=await getInvoice(invoiceId);
-  const email=invoice?.customer?.email;
-  const payment=invoice?.payments?.[invoice.payments.length-1];
-  if(!invoice || !email || !payment?.id){
-    console.error("Payment receipt could not be sent: invoice, customer email, or payment ID missing.");
-    return false;
-  }
-  const message=`Thank you for your payment to Kendis Kitchen.\n\nInvoice: ${invoice.invoiceNumber || invoiceId}\nAmount paid: $${money(payment.amount)}\n\n${invoice.memo || "Your Kendis Kitchen order has been paid in full."}\n\nYour payment receipt is attached. We look forward to serving you!`;
-  const q=`mutation ($input:InvoicePaymentReceiptSendInput!){ invoicePaymentReceiptSend(input:$input){ didSucceed inputErrors{message code path} } }`;
-  const data=await wave(q,{input:{invoiceId,invoicePaymentId:payment.id,to:[email],subject:`Payment confirmed — Kendis Kitchen ${invoice.invoiceNumber || ""}`.trim(),message,attachPdf:true}});
-  const out=data.invoicePaymentReceiptSend;
-  if(!out.didSucceed){
-    console.error("Wave payment receipt email failed:",out.inputErrors);
-    return false;
-  }
-  console.log(`Payment receipt queued for ${email} for invoice ${invoice.invoiceNumber || invoiceId}`);
-  return true;
-}
-
-async function sendPaymentReceiptOnce(invoiceId){
-  if(receiptSentInvoices.has(invoiceId)) return true;
-  if(receiptInFlight.has(invoiceId)) return receiptInFlight.get(invoiceId);
-  const promise=(async()=>{
-    try{
-      const sent=await sendPaymentReceipt(invoiceId);
-      if(sent) receiptSentInvoices.add(invoiceId);
-      return sent;
-    }finally{
-      receiptInFlight.delete(invoiceId);
-    }
-  })();
-  receiptInFlight.set(invoiceId,promise);
-  return promise;
-}
-
-app.post("/api/wave-webhook",express.raw({type:"application/json",limit:"1mb"}),async(req,res)=>{
-  try{
-    const secret=process.env.WAVE_WEBHOOK_SECRET;
-    if(!secret) return res.status(500).send("Webhook secret is not configured.");
-    const signatureHeader=req.get("x-wave-signature")||"";
-    const timestampHeader=req.get("x-wave-timestamp")||"";
-    const parts=Object.fromEntries(signatureHeader.split(",").map(part=>part.split("=")).filter(pair=>pair.length===2));
-    const timestamp=parts.t||timestampHeader;
-    const receivedSignature=parts.v1;
-    if(!timestamp||!receivedSignature) return res.status(400).send("Invalid webhook signature.");
-    const timestampNumber=Number(timestamp);
-    if(!Number.isFinite(timestampNumber)||Math.abs(Date.now()/1000-timestampNumber)>300) return res.status(400).send("Webhook timestamp outside tolerance window.");
-    const rawBody=Buffer.isBuffer(req.body)?req.body.toString("utf8"):String(req.body||"");
-    const expectedSignature=crypto.createHmac("sha256",secret).update(`${timestamp}.${rawBody}`,"utf8").digest("hex");
-    const received=Buffer.from(receivedSignature,"utf8"),expected=Buffer.from(expectedSignature,"utf8");
-    if(received.length!==expected.length||!crypto.timingSafeEqual(received,expected)) return res.status(401).send("Invalid webhook signature.");
-    const event=JSON.parse(rawBody);
-    console.log("Wave webhook received:",{eventType:event.event_type,eventId:event.event_id,invoiceId:event.data?.invoice_id,amountPaid:event.data?.amount_paid,remainingBalance:event.data?.remaining_balance});
-    if(event.event_type==="invoice.paid"&&event.data?.invoice_id){
-      const invoiceId=event.data.invoice_id;
-      const key=event.event_id||invoiceId;
-      if(!processedPaymentEvents.has(key)){
-        const receiptSent=await sendPaymentReceiptOnce(invoiceId);
-        if(!receiptSent) return res.status(500).send("Payment received, but receipt email could not be queued. Please retry webhook delivery.");
-        processedPaymentEvents.add(key);
-        if(processedPaymentEvents.size>1000) processedPaymentEvents.delete(processedPaymentEvents.values().next().value);
-      }
-    }
-    return res.sendStatus(200);
-  }catch(e){ console.error("Wave webhook error:",e); return res.status(400).send("Invalid webhook payload."); }
-});
-
+async function findCustomer(email){const q=`query ($businessId: ID!, $email: String) { business(id:$businessId) { customers(page:1,pageSize:10,email:$email) { edges { node { id name email } } } } }`;const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,email});return data.business?.customers?.edges?.[0]?.node||null}
+async function createCustomer(customer){const q=`mutation ($input: CustomerCreateInput!) { customerCreate(input:$input) { didSucceed inputErrors { message code path } customer { id name email } } }`;const data=await wave(q,{input:{businessId:process.env.WAVE_BUSINESS_ID,name:customer.name,email:customer.email,mobile:customer.phone||null}});const out=data.customerCreate;if(!out.didSucceed)throw new Error(out.inputErrors?.map(e=>e.message).join("; ")||"Could not create customer in Wave.");return out.customer}
+async function findIncomeAccount(){if(process.env.WAVE_INCOME_ACCOUNT_ID)return process.env.WAVE_INCOME_ACCOUNT_ID;const q=`query ($businessId:ID!,$page:Int!,$pageSize:Int!){ business(id:$businessId){ accounts(page:$page,pageSize:$pageSize,subtypes:[INCOME,OTHER_INCOME]){ edges{node{id name isArchived subtype{value}}} } } }`;const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,page:1,pageSize:50});const account=data.business?.accounts?.edges?.map(e=>e.node).find(a=>!a.isArchived);if(!account)throw new Error("No active Wave income account was found. Add WAVE_INCOME_ACCOUNT_ID in Render Environment.");return account.id}
+async function findOrCreateProduct(item){const incomeAccountId=await findIncomeAccount();const q=`query ($businessId:ID!,$page:Int!,$pageSize:Int!){ business(id:$businessId){ products(page:$page,pageSize:$pageSize,isArchived:false){ edges{node{id name unitPrice incomeAccount{id name}}} } } }`;const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,page:1,pageSize:100});const existing=data.business?.products?.edges?.map(e=>e.node).find(p=>p.name.toLowerCase()===item.name.toLowerCase());if(existing){if(!existing.incomeAccount?.id){const patch=`mutation ($input:ProductPatchInput!){ productPatch(input:$input){ didSucceed inputErrors{message code path} product{id name unitPrice incomeAccount{id name}} } }`;const patched=await wave(patch,{input:{id:existing.id,incomeAccountId}});const out=patched.productPatch;if(!out.didSucceed)throw new Error(out.inputErrors?.map(e=>e.message).join("; ")||`Could not set income account for ${item.name}.`);return out.product}return existing}const m=`mutation ($input:ProductCreateInput!){ productCreate(input:$input){ didSucceed inputErrors{message code path} product{id name unitPrice incomeAccount{id name}} } }`;const created=await wave(m,{input:{businessId:process.env.WAVE_BUSINESS_ID,name:item.name,unitPrice:money(item.price),description:`Kendis Kitchen menu item — ${item.category}`,incomeAccountId}});const out=created.productCreate;if(!out.didSucceed)throw new Error(out.inputErrors?.map(e=>e.message).join("; ")||`Could not create Wave product ${item.name}.`);return out.product}
+async function getInvoice(invoiceId){const q=`query ($businessId:ID!,$invoiceId:ID!){ business(id:$businessId){ invoice(id:$invoiceId){ id invoiceNumber viewUrl status memo customer{id name email mobile phone} payments{id amount paymentDate paymentMethod} amountDue{value currency{symbol code}} amountPaid{value currency{symbol code}} total{value currency{symbol code}} items{product{name} quantity price subtotal{value}} } } }`;const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,invoiceId});return data.business?.invoice||null}
+async function listInvoices(){const q=`query ($businessId:ID!,$page:Int!,$pageSize:Int!){ business(id:$businessId){ invoices(page:$page,pageSize:$pageSize,sort:[CREATED_AT_DESC]) { pageInfo{currentPage totalPages totalCount} edges{node{id invoiceNumber viewUrl status memo customer{id name email mobile phone} createdAt modifiedAt amountDue{value currency{symbol code}} amountPaid{value currency{symbol code}} total{value currency{symbol code}} items{product{name} quantity price subtotal{value}}} } } }`;const data=await wave(q,{businessId:process.env.WAVE_BUSINESS_ID,page:1,pageSize:100});return data.business?.invoices||{edges:[],pageInfo:{totalCount:0}}}
+function parseOrderMemo(memo=""){const lines=String(memo).split(/\r?\n/);const statusLine=lines.find(x=>/^Order Status:/i.test(x));const raw=statusLine?.split(":").slice(1).join(":").trim().toUpperCase();const status=ORDER_STATUSES.includes(raw)?raw:null;const pickupLine=lines.find(x=>/^Pickup:/i.test(x));const notesIndex=lines.findIndex(x=>/^Customer notes:/i.test(x));return{status,pickup:pickupLine?.replace(/^Pickup:\s*/i,"")||"",notes:notesIndex>=0?lines.slice(notesIndex).join("\n").replace(/^Customer notes:\s*/i,""):""}}
+function buildOrderMemo(invoice,status){const parsed=parseOrderMemo(invoice.memo||"");return["Kendis Kitchen online order",`Order Status: ${status}`,`Pickup: ${parsed.pickup||"Not specified"}`,parsed.notes?`Customer notes: ${parsed.notes}`:""].filter(Boolean).join("\n")}
+async function patchOrderStatus(invoiceId,status){const invoice=await getInvoice(invoiceId);if(!invoice)throw new Error("Invoice not found.");const q=`mutation ($input:InvoicePatchInput!){ invoicePatch(input:$input){ didSucceed inputErrors{message code path} invoice{id invoiceNumber memo status} } }`;const data=await wave(q,{input:{id:invoiceId,memo:buildOrderMemo(invoice,status)}});const out=data.invoicePatch;if(!out.didSucceed)throw new Error(out.inputErrors?.map(e=>e.message).join("; ")||"Could not update order status.");return out.invoice}
+async function sendPaymentReceipt(invoiceId){const invoice=await getInvoice(invoiceId);const email=invoice?.customer?.email;const payment=invoice?.payments?.[invoice.payments.length-1];if(!invoice||!email||!payment?.id){console.error("Payment receipt could not be sent: invoice, customer email, or payment ID missing.");return false}const message=`Thank you for your payment to Kendis Kitchen.\n\nInvoice: ${invoice.invoiceNumber||invoiceId}\nAmount paid: $${money(payment.amount)}\n\n${invoice.memo||"Your Kendis Kitchen order has been paid in full."}\n\nYour payment receipt is attached. We look forward to serving you!`;const q=`mutation ($input:InvoicePaymentReceiptSendInput!){ invoicePaymentReceiptSend(input:$input){ didSucceed inputErrors{message code path} } }`;const data=await wave(q,{input:{invoiceId,invoicePaymentId:payment.id,to:[email],subject:`Payment confirmed — Kendis Kitchen ${invoice.invoiceNumber||""}`.trim(),message,attachPdf:true}});const out=data.invoicePaymentReceiptSend;if(!out.didSucceed){console.error("Wave payment receipt email failed:",out.inputErrors);return false}console.log(`Payment receipt queued for ${email} for invoice ${invoice.invoiceNumber||invoiceId}`);return true}
+async function sendPaymentReceiptOnce(invoiceId){if(receiptSentInvoices.has(invoiceId))return true;if(receiptInFlight.has(invoiceId))return receiptInFlight.get(invoiceId);const promise=(async()=>{try{const sent=await sendPaymentReceipt(invoiceId);if(sent)receiptSentInvoices.add(invoiceId);return sent}finally{receiptInFlight.delete(invoiceId)}})();receiptInFlight.set(invoiceId,promise);return promise}
+function adminConfigured(){return Boolean(process.env.ADMIN_PASSWORD)}
+function adminSignature(){return crypto.createHmac("sha256",process.env.ADMIN_PASSWORD||"").update("kendis-kitchen-admin").digest("hex")}
+function adminAuthed(req){return adminConfigured()&&req.cookies?.[ADMIN_COOKIE]===adminSignature()}
+function requireAdmin(req,res,next){if(!adminAuthed(req))return res.status(401).json({error:"Admin authentication required."});next()}
+app.use((req,res,next)=>{const header=req.get("cookie")||"";req.cookies=Object.fromEntries(header.split(";").map(x=>x.trim().split("=")).filter(x=>x.length===2));next()});
+app.post("/api/admin/login",express.json(),(req,res)=>{if(!adminConfigured())return res.status(503).json({error:"Admin access is not configured. Add ADMIN_PASSWORD in Render Environment."});const password=String(req.body?.password||"");const expected=String(process.env.ADMIN_PASSWORD);const a=Buffer.from(password),b=Buffer.from(expected);if(a.length!==b.length||!crypto.timingSafeEqual(a,b))return res.status(401).json({error:"Incorrect admin password."});res.setHeader("Set-Cookie",`${ADMIN_COOKIE}=${adminSignature()}; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=28800`);res.json({ok:true})});
+app.post("/api/admin/logout",requireAdmin,(req,res)=>{res.setHeader("Set-Cookie",`${ADMIN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`);res.json({ok:true})});
+app.get("/api/admin/session",(req,res)=>res.json({authenticated:adminAuthed(req),configured:adminConfigured()}));
+app.post("/api/wave-webhook",express.raw({type:"application/json",limit:"1mb"}),async(req,res)=>{try{const secret=process.env.WAVE_WEBHOOK_SECRET;if(!secret)return res.status(500).send("Webhook secret is not configured.");const signatureHeader=req.get("x-wave-signature")||"";const timestampHeader=req.get("x-wave-timestamp")||"";const parts=Object.fromEntries(signatureHeader.split(",").map(part=>part.split("=")).filter(pair=>pair.length===2));const timestamp=parts.t||timestampHeader;const receivedSignature=parts.v1;if(!timestamp||!receivedSignature)return res.status(400).send("Invalid webhook signature.");const timestampNumber=Number(timestamp);if(!Number.isFinite(timestampNumber)||Math.abs(Date.now()/1000-timestampNumber)>300)return res.status(400).send("Webhook timestamp outside tolerance window.");const rawBody=Buffer.isBuffer(req.body)?req.body.toString("utf8"):String(req.body||"");const expectedSignature=crypto.createHmac("sha256",secret).update(`${timestamp}.${rawBody}`,"utf8").digest("hex");const received=Buffer.from(receivedSignature,"utf8"),expected=Buffer.from(expectedSignature,"utf8");if(received.length!==expected.length||!crypto.timingSafeEqual(received,expected))return res.status(401).send("Invalid webhook signature.");const event=JSON.parse(rawBody);console.log("Wave webhook received:",{eventType:event.event_type,eventId:event.event_id,invoiceId:event.data?.invoice_id,amountPaid:event.data?.amount_paid,remainingBalance:event.data?.remaining_balance});if(event.event_type==="invoice.paid"&&event.data?.invoice_id){const invoiceId=event.data.invoice_id;const key=event.event_id||invoiceId;if(!processedPaymentEvents.has(key)){const receiptSent=await sendPaymentReceiptOnce(invoiceId);if(!receiptSent)return res.status(500).send("Payment received, but receipt email could not be queued. Please retry webhook delivery.");try{await patchOrderStatus(invoiceId,"NEW")}catch(e){console.error("Could not set new order status:",e.message)}processedPaymentEvents.add(key);if(processedPaymentEvents.size>1000)processedPaymentEvents.delete(processedPaymentEvents.values().next().value)}}return res.sendStatus(200)}catch(e){console.error("Wave webhook error:",e);return res.status(400).send("Invalid webhook payload.")}});
 app.use(express.json({limit:"1mb"}));
 app.use(express.static(path.join(__dirname,"public")));
-
 app.get("/api/menu",(_req,res)=>res.json(MENU));
-
-app.get("/api/invoice-status",async(req,res)=>{
-  try{
-    const invoiceId=String(req.query.invoiceId||"").trim();
-    if(!invoiceId) return res.status(400).json({error:"invoiceId is required."});
-    const invoice=await getInvoice(invoiceId);
-    if(!invoice) return res.status(404).json({error:"Invoice not found."});
-    const total=Number(invoice.total?.value||0),amountPaid=Number(invoice.amountPaid?.value||0),amountDue=Number(invoice.amountDue?.value||0);
-    const paid=invoice.status==="PAID"||(total>0&&amountDue<=0&&amountPaid>=total);
-    let receiptSent=false;
-    if(paid){
-      receiptSent=await sendPaymentReceiptOnce(invoiceId);
-    }
-    res.json({paid,status:invoice.status,invoiceNumber:invoice.invoiceNumber,total,amountPaid,amountDue,invoiceUrl:invoice.viewUrl,receiptSent});
-  }catch(e){ console.error("Invoice status error:",e); res.status(500).json({error:e.message||"Could not retrieve invoice status."}); }
-});
-
-app.post("/api/order",async(req,res)=>{
-  try{
-    const {customer,items,pickupDate,pickupTime,notes}=req.body;
-    if(!process.env.WAVE_BUSINESS_ID||!process.env.WAVE_ACCESS_TOKEN) return res.status(500).json({error:"Wave is not connected yet. Add the Wave access token and Kendis Kitchen business ID in Render."});
-    if(!customer?.name||!customer?.email||!pickupDate||!pickupTime) return res.status(400).json({error:"Please provide name, email, pickup date, and pickup time."});
-    if(!Array.isArray(items)||!items.length) return res.status(400).json({error:"Please select at least one menu item."});
-    const normalized=items.map(i=>{
-      const menuItem=MENU.find(m=>m.name===i.name);
-      const quantity=Math.max(1,Number(i.quantity||1));
-      if(!menuItem) throw new Error(`Menu item not found: ${i.name}`);
-      return {...menuItem,quantity};
-    });
-    const subtotal=normalized.reduce((s,i)=>s+i.price*i.quantity,0);
-    const waveCustomer=await (await findCustomer(customer.email))||await createCustomer(customer);
-    const invoiceItems=[];
-    for(const item of normalized){ const product=await findOrCreateProduct(item); invoiceItems.push({productId:product.id,quantity:String(item.quantity),unitPrice:money(item.price)}); }
-    const memo=["Kendis Kitchen online order",`Pickup: ${pickupDate} at ${pickupTime}`,notes?`Customer notes: ${notes}`:""].filter(Boolean).join("\n");
-    const mutation=`mutation ($input:InvoiceCreateInput!){ invoiceCreate(input:$input){ didSucceed inputErrors{message code path} invoice{id invoiceNumber viewUrl status disableCreditCardPayments disableBankPayments disableAmexPayments total{value currency{symbol}} amountDue{value currency{symbol}} amountPaid{value currency{symbol}}} } }`;
-    const invoiceData=await wave(mutation,{input:{businessId:process.env.WAVE_BUSINESS_ID,customerId:waveCustomer.id,status:"SAVED",items:invoiceItems,memo,disableBankPayments:false,disableCreditCardPayments:false,disableAmexPayments:false,requireTermsOfServiceAgreement:false}});
-    const invoice=invoiceData.invoiceCreate.invoice;
-    if(!invoiceData.invoiceCreate.didSucceed||!invoice) throw new Error(invoiceData.invoiceCreate.inputErrors?.map(e=>e.message).join("; ")||"Wave could not create the invoice.");
-    const eventTitle=`Kendis Kitchen Order ${invoice.invoiceNumber||""}`.trim();
-    const details=`Kendis Kitchen order\nWave invoice: ${invoice.viewUrl}\nTotal: $${money(subtotal)}\n${normalized.map(i=>`${i.quantity} × ${i.name}`).join("\n")}${notes?`\nNotes: ${notes}`:""}`;
-    const start=`${pickupDate.replaceAll("-","")}T${pickupTime.replace(":","")}00`;
-    const calendarUrl="https://calendar.google.com/calendar/render?action=TEMPLATE"+`&text=${encodeURIComponent(eventTitle)}`+`&dates=${encodeURIComponent(start+"/"+start)}`+`&details=${encodeURIComponent(details)}`;
-    res.json({invoiceId:invoice.id,invoiceUrl:invoice.viewUrl,invoiceNumber:invoice.invoiceNumber,total:subtotal,calendarUrl,message:"Order created in Wave. Use the Pay Now button on the hosted Wave invoice to complete payment."});
-  }catch(e){ console.error(e); res.status(500).json({error:e.message||"Something went wrong creating the order."}); }
-});
-
+app.get("/api/invoice-status",async(req,res)=>{try{const invoiceId=String(req.query.invoiceId||"").trim();if(!invoiceId)return res.status(400).json({error:"invoiceId is required."});const invoice=await getInvoice(invoiceId);if(!invoice)return res.status(404).json({error:"Invoice not found."});const total=Number(invoice.total?.value||0),amountPaid=Number(invoice.amountPaid?.value||0),amountDue=Number(invoice.amountDue?.value||0);const paid=invoice.status==="PAID"||(total>0&&amountDue<=0&&amountPaid>=total);let receiptSent=false;if(paid)receiptSent=await sendPaymentReceiptOnce(invoiceId);res.json({paid,status:invoice.status,invoiceNumber:invoice.invoiceNumber,total,amountPaid,amountDue,invoiceUrl:invoice.viewUrl,receiptSent})}catch(e){console.error("Invoice status error:",e);res.status(500).json({error:e.message||"Could not retrieve invoice status."})}});
+app.get("/api/admin/orders",requireAdmin,async(_req,res)=>{try{const connection=await listInvoices();const orders=(connection.edges||[]).map(({node})=>{const parsed=parseOrderMemo(node.memo||"");const total=Number(node.total?.value||0),amountPaid=Number(node.amountPaid?.value||0);const paid=amountPaid>=total&&total>0;return{id:node.id,invoiceNumber:node.invoiceNumber,invoiceUrl:node.viewUrl,status:parsed.status||(!paid?"UNPAID":"NEW"),waveStatus:node.status,customer:node.customer||{},createdAt:node.createdAt,total,amountPaid,amountDue:Number(node.amountDue?.value||0),pickup:parsed.pickup,notes:parsed.notes,items:(node.items||[]).map(i=>({name:i.product?.name||"Item",quantity:Number(i.quantity||0),price:Number(i.price||0),subtotal:Number(i.subtotal?.value||0)}))}});res.json({orders,total:connection.pageInfo?.totalCount||orders.length})}catch(e){console.error("Admin orders error:",e);res.status(500).json({error:e.message||"Could not load orders."})}});
+app.patch("/api/admin/orders/:invoiceId/status",requireAdmin,async(req,res)=>{try{const status=String(req.body?.status||"").toUpperCase();if(!ORDER_STATUSES.includes(status))return res.status(400).json({error:`Invalid status. Use: ${ORDER_STATUSES.join(", ")}`});const invoice=await patchOrderStatus(req.params.invoiceId,status);res.json({ok:true,invoice})}catch(e){console.error("Admin status update error:",e);res.status(500).json({error:e.message||"Could not update order status."})}});
+app.post("/api/order",async(req,res)=>{try{const {customer,items,pickupDate,pickupTime,notes}=req.body;if(!process.env.WAVE_BUSINESS_ID||!process.env.WAVE_ACCESS_TOKEN)return res.status(500).json({error:"Wave is not connected yet. Add the Wave access token and Kendis Kitchen business ID in Render."});if(!customer?.name||!customer?.email||!pickupDate||!pickupTime)return res.status(400).json({error:"Please provide name, email, pickup date, and pickup time."});if(!Array.isArray(items)||!items.length)return res.status(400).json({error:"Please select at least one menu item."});const normalized=items.map(i=>{const menuItem=MENU.find(m=>m.name===i.name);const quantity=Math.max(1,Number(i.quantity||1));if(!menuItem)throw new Error(`Menu item not found: ${i.name}`);return{...menuItem,quantity}});const subtotal=normalized.reduce((s,i)=>s+i.price*i.quantity,0);const waveCustomer=await(await findCustomer(customer.email))||await createCustomer(customer);const invoiceItems=[];for(const item of normalized){const product=await findOrCreateProduct(item);invoiceItems.push({productId:product.id,quantity:String(item.quantity),unitPrice:money(item.price)})}const memo=["Kendis Kitchen online order","Order Status: NEW",`Pickup: ${pickupDate} at ${pickupTime}`,notes?`Customer notes: ${notes}`:""].filter(Boolean).join("\n");const mutation=`mutation ($input:InvoiceCreateInput!){ invoiceCreate(input:$input){ didSucceed inputErrors{message code path} invoice{id invoiceNumber viewUrl status disableCreditCardPayments disableBankPayments disableAmexPayments total{value currency{symbol}} amountDue{value currency{symbol}} amountPaid{value currency{symbol}}} } }`;const invoiceData=await wave(mutation,{input:{businessId:process.env.WAVE_BUSINESS_ID,customerId:waveCustomer.id,status:"SAVED",items:invoiceItems,memo,disableBankPayments:false,disableCreditCardPayments:false,disableAmexPayments:false,requireTermsOfServiceAgreement:false}});const invoice=invoiceData.invoiceCreate.invoice;if(!invoiceData.invoiceCreate.didSucceed||!invoice)throw new Error(invoiceData.invoiceCreate.inputErrors?.map(e=>e.message).join("; ")||"Wave could not create the invoice.");const eventTitle=`Kendis Kitchen Order ${invoice.invoiceNumber||""}`.trim();const details=`Kendis Kitchen order\nWave invoice: ${invoice.viewUrl}\nTotal: $${money(subtotal)}\n${normalized.map(i=>`${i.quantity} × ${i.name}`).join("\n")}${notes?`\nNotes: ${notes}`:""}`;const start=`${pickupDate.replaceAll("-","")}T${pickupTime.replace(":","")}00`;const calendarUrl="https://calendar.google.com/calendar/render?action=TEMPLATE"+`&text=${encodeURIComponent(eventTitle)}`+`&dates=${encodeURIComponent(start+"/"+start)}`+`&details=${encodeURIComponent(details)}`;res.json({invoiceId:invoice.id,invoiceUrl:invoice.viewUrl,invoiceNumber:invoice.invoiceNumber,total:subtotal,calendarUrl,message:"Order created in Wave. Use the Pay Now button on the hosted Wave invoice to complete payment."})}catch(e){console.error(e);res.status(500).json({error:e.message||"Something went wrong creating the order."})}});
+app.get("/admin",(_req,res)=>res.sendFile(path.join(__dirname,"public","admin.html")));
 app.use((req,res)=>res.sendFile(path.join(__dirname,"index.html")));
 app.listen(PORT,"0.0.0.0",()=>console.log(`Kendis Kitchen order app running on port ${PORT}`));
