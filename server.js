@@ -66,7 +66,31 @@ async function patchOrderStatus(invoiceId,status){const invoice=await getInvoice
 function notificationConfig(){return{email:Boolean(process.env.RESEND_API_KEY&&process.env.NOTIFICATION_FROM_EMAIL),sms:Boolean(process.env.TWILIO_ACCOUNT_SID&&process.env.TWILIO_AUTH_TOKEN&&process.env.TWILIO_FROM_NUMBER)}}
 function notificationStatusText(status){const messages={CONFIRMED:"Your Kendis Kitchen order has been confirmed.",PREPARING:"Your Kendis Kitchen order is now being prepared.",READY:"Your Kendis Kitchen order is ready for pickup.",COMPLETED:"Your Kendis Kitchen order has been completed. Thank you for choosing Kendis Kitchen!",CANCELLED:"Your Kendis Kitchen order has been cancelled. Please contact Kendis Kitchen if you have questions."};return messages[status]||`Your Kendis Kitchen order status is now ${status}.`}
 function notificationSubject(status,invoiceNumber){const labels={CONFIRMED:"Order confirmed",PREPARING:"Order is being prepared",READY:"Order ready for pickup",COMPLETED:"Order completed",CANCELLED:"Order cancelled"};return`${labels[status]||"Order update"} — Kendis Kitchen${invoiceNumber?` #${invoiceNumber}`:""}`}
-function notificationMessage(invoice,status){const parsed=parseOrderMemo(invoice.memo||"");const items=(invoice.items||[]).map(i=>`${Number(i.quantity||0)} × ${i.product?.name||"Item"}`).join("\n");return[`Hello ${invoice.customer?.name||"Customer"},","",notificationStatusText(status),"",`Order: #${invoice.invoiceNumber||invoice.id}`,parsed.pickup?`Pickup: ${parsed.pickup}`:"",items?`Items:\n${items}`:"",parsed.notes?`Notes: ${parsed.notes}`:"",status==="READY"?"Please come to Kendis Kitchen for pickup at your scheduled time.":"",status==="CANCELLED"?"Please contact Kendis Kitchen if you need assistance.":"","","Kendis Kitchen"].filter(Boolean).join("\n")}
+function notificationMessage(invoice,status){
+  const parsed=parseOrderMemo(invoice.memo||"");
+  const items=(invoice.items||[])
+    .map(i=>`${Number(i.quantity||0)} × ${i.product?.name||"Item"}`)
+    .join("\n");
+
+  return [
+    `Hello ${invoice.customer?.name||"Customer"},`,
+    "",
+    notificationStatusText(status),
+    "",
+    `Order: #${invoice.invoiceNumber||invoice.id}`,
+    parsed.pickup ? `Pickup: ${parsed.pickup}` : "",
+    items ? `Items:\n${items}` : "",
+    parsed.notes ? `Notes: ${parsed.notes}` : "",
+    status==="READY"
+      ? "Please come to Kendis Kitchen for pickup at your scheduled time."
+      : "",
+    status==="CANCELLED"
+      ? "Please contact Kendis Kitchen if you need assistance."
+      : "",
+    "",
+    "Kendis Kitchen"
+  ].filter(Boolean).join("\n");
+}
 async function sendEmailNotification(invoice,status){const email=invoice.customer?.email;if(!email||!process.env.RESEND_API_KEY||!process.env.NOTIFICATION_FROM_EMAIL)return false;const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:`Bearer ${process.env.RESEND_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({from:process.env.NOTIFICATION_FROM_EMAIL,to:[email],subject:notificationSubject(status,invoice.invoiceNumber),text:notificationMessage(invoice,status)})});const body=await r.json().catch(()=>({}));if(!r.ok)throw new Error(body?.message||body?.error||`Resend HTTP ${r.status}`);return true}
 async function sendSmsNotification(invoice,status){const to=invoice.customer?.mobile||invoice.customer?.phone;if(!to||!process.env.TWILIO_ACCOUNT_SID||!process.env.TWILIO_AUTH_TOKEN||!process.env.TWILIO_FROM_NUMBER)return false;const parsed=parseOrderMemo(invoice.memo||"");const text=`Kendis Kitchen: ${notificationStatusText(status)} Order #${invoice.invoiceNumber||invoice.id}.${parsed.pickup?` Pickup: ${parsed.pickup}.`:""}`;const auth=Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");const params=new URLSearchParams({To:String(to),From:String(process.env.TWILIO_FROM_NUMBER),Body:text});const r=await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(process.env.TWILIO_ACCOUNT_SID)}/Messages.json`,{method:"POST",headers:{Authorization:`Basic ${auth}`,"Content-Type":"application/x-www-form-urlencoded"},body:params});const body=await r.json().catch(()=>({}));if(!r.ok)throw new Error(body?.message||`Twilio HTTP ${r.status}`);return true}
 async function sendOrderStatusNotification(invoiceId,status){if(!NOTIFIABLE_STATUSES.includes(status))return{email:false,sms:false,configured:notificationConfig()};const key=`${invoiceId}:${status}`;if(notificationSent.has(key))return{email:false,sms:false,alreadySent:true,configured:notificationConfig()};if(notificationInFlight.has(key))return notificationInFlight.get(key);const promise=(async()=>{const result={email:false,sms:false,errors:[],configured:notificationConfig()};try{const invoice=await getInvoice(invoiceId);if(!invoice)throw new Error("Invoice not found for customer notification.");if(result.configured.email){try{result.email=await sendEmailNotification(invoice,status)}catch(e){result.errors.push(`Email: ${e.message}`)}}if(result.configured.sms){try{result.sms=await sendSmsNotification(invoice,status)}catch(e){result.errors.push(`SMS: ${e.message}`)}}if(result.email||result.sms)notificationSent.add(key);if(result.errors.length)console.error(`Order notification errors for ${invoice.invoiceNumber||invoiceId}:`,result.errors);return result}finally{notificationInFlight.delete(key)}})();notificationInFlight.set(key,promise);return promise}
