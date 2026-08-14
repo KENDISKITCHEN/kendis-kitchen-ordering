@@ -68,12 +68,9 @@ function notificationStatusText(status){const messages={CONFIRMED:"Your Kendis K
 function notificationSubject(status,invoiceNumber){const labels={CONFIRMED:"Order confirmed",PREPARING:"Order is being prepared",READY:"Order ready for pickup",COMPLETED:"Order completed",CANCELLED:"Order cancelled"};return`${labels[status]||"Order update"} — Kendis Kitchen${invoiceNumber?` #${invoiceNumber}`:""}`}
 function notificationMessage(invoice,status){
   const parsed=parseOrderMemo(invoice.memo||"");
-  const items=(invoice.items||[])
-    .map(i=>`${Number(i.quantity||0)} × ${i.product?.name||"Item"}`)
-    .join("\n");
-
+  const items=(invoice.items||[]).map(i=>`${Number(i.quantity||0)} × ${i.product?.name||"Item"}`).join("\n");
   return [
-    `Hello ${invoice.customer?.name||"Customer"},`,
+    `Hello ${invoice.customer?.name||"Customer"}`,
     "",
     notificationStatusText(status),
     "",
@@ -81,19 +78,50 @@ function notificationMessage(invoice,status){
     parsed.pickup ? `Pickup: ${parsed.pickup}` : "",
     items ? `Items:\n${items}` : "",
     parsed.notes ? `Notes: ${parsed.notes}` : "",
-    status==="READY"
-      ? "Please come to Kendis Kitchen for pickup at your scheduled time."
-      : "",
-    status==="CANCELLED"
-      ? "Please contact Kendis Kitchen if you need assistance."
-      : "",
+    status==="READY" ? "Please come to Kendis Kitchen for pickup at your scheduled time." : "",
+    status==="CANCELLED" ? "Please contact Kendis Kitchen if you need assistance." : "",
     "",
     "Kendis Kitchen"
   ].filter(Boolean).join("\n");
 }
-async function sendEmailNotification(invoice,status){const email=invoice.customer?.email;if(!email||!process.env.RESEND_API_KEY||!process.env.NOTIFICATION_FROM_EMAIL)return false;const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:`Bearer ${process.env.RESEND_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({from:process.env.NOTIFICATION_FROM_EMAIL,to:[email],subject:notificationSubject(status,invoice.invoiceNumber),text:notificationMessage(invoice,status)})});const body=await r.json().catch(()=>({}));if(!r.ok)throw new Error(body?.message||body?.error||`Resend HTTP ${r.status}`);return true}
+async function sendEmailNotification(invoice,status){
+  const email=invoice.customer?.email;
+  console.log(`[NOTIFICATION] Email requested for order #${invoice.invoiceNumber||invoice.id}; customer email=${email||"MISSING"}; configured=${Boolean(process.env.RESEND_API_KEY&&process.env.NOTIFICATION_FROM_EMAIL)}`);
+  if(!email){console.error(`[NOTIFICATION] Email skipped: customer email is missing for order #${invoice.invoiceNumber||invoice.id}.`);return false}
+  if(!process.env.RESEND_API_KEY||!process.env.NOTIFICATION_FROM_EMAIL){console.error(`[NOTIFICATION] Email skipped: RESEND_API_KEY or NOTIFICATION_FROM_EMAIL is missing.`);return false}
+  const from=String(process.env.NOTIFICATION_FROM_EMAIL).trim();
+  const subject=notificationSubject(status,invoice.invoiceNumber);
+  console.log(`[NOTIFICATION] Sending Resend email: from=${from}, to=${email}, subject=${subject}`);
+  const r=await fetch("https://api.resend.com/emails",{method:"POST",headers:{Authorization:`Bearer ${process.env.RESEND_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({from,to:[email],subject,text:notificationMessage(invoice,status)})});
+  const body=await r.json().catch(()=>({}));
+  console.log(`[NOTIFICATION] Resend response: HTTP ${r.status}; id=${body?.id||"none"}; message=${body?.message||body?.error||"none"}`);
+  if(!r.ok)throw new Error(body?.message||body?.error||`Resend HTTP ${r.status}`);
+  return true;
+}
 async function sendSmsNotification(invoice,status){const to=invoice.customer?.mobile||invoice.customer?.phone;if(!to||!process.env.TWILIO_ACCOUNT_SID||!process.env.TWILIO_AUTH_TOKEN||!process.env.TWILIO_FROM_NUMBER)return false;const parsed=parseOrderMemo(invoice.memo||"");const text=`Kendis Kitchen: ${notificationStatusText(status)} Order #${invoice.invoiceNumber||invoice.id}.${parsed.pickup?` Pickup: ${parsed.pickup}.`:""}`;const auth=Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");const params=new URLSearchParams({To:String(to),From:String(process.env.TWILIO_FROM_NUMBER),Body:text});const r=await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(process.env.TWILIO_ACCOUNT_SID)}/Messages.json`,{method:"POST",headers:{Authorization:`Basic ${auth}`,"Content-Type":"application/x-www-form-urlencoded"},body:params});const body=await r.json().catch(()=>({}));if(!r.ok)throw new Error(body?.message||`Twilio HTTP ${r.status}`);return true}
-async function sendOrderStatusNotification(invoiceId,status){if(!NOTIFIABLE_STATUSES.includes(status))return{email:false,sms:false,configured:notificationConfig()};const key=`${invoiceId}:${status}`;if(notificationSent.has(key))return{email:false,sms:false,alreadySent:true,configured:notificationConfig()};if(notificationInFlight.has(key))return notificationInFlight.get(key);const promise=(async()=>{const result={email:false,sms:false,errors:[],configured:notificationConfig()};try{const invoice=await getInvoice(invoiceId);if(!invoice)throw new Error("Invoice not found for customer notification.");if(result.configured.email){try{result.email=await sendEmailNotification(invoice,status)}catch(e){result.errors.push(`Email: ${e.message}`)}}if(result.configured.sms){try{result.sms=await sendSmsNotification(invoice,status)}catch(e){result.errors.push(`SMS: ${e.message}`)}}if(result.email||result.sms)notificationSent.add(key);if(result.errors.length)console.error(`Order notification errors for ${invoice.invoiceNumber||invoiceId}:`,result.errors);return result}finally{notificationInFlight.delete(key)}})();notificationInFlight.set(key,promise);return promise}
+async function sendOrderStatusNotification(invoiceId,status){
+  if(!NOTIFIABLE_STATUSES.includes(status))return{email:false,sms:false,configured:notificationConfig()};
+  const key=`${invoiceId}:${status}`;
+  console.log(`[NOTIFICATION] Status notification triggered: invoiceId=${invoiceId}; status=${status}; key=${key}`);
+  if(notificationSent.has(key)){console.log(`[NOTIFICATION] Already sent in this server session: ${key}`);return{email:false,sms:false,alreadySent:true,configured:notificationConfig()}}
+  if(notificationInFlight.has(key)){console.log(`[NOTIFICATION] Notification already in flight: ${key}`);return notificationInFlight.get(key)}
+  const promise=(async()=>{
+    const result={email:false,sms:false,errors:[],configured:notificationConfig()};
+    try{
+      const invoice=await getInvoice(invoiceId);
+      if(!invoice)throw new Error("Invoice not found for customer notification.");
+      console.log(`[NOTIFICATION] Invoice loaded: #${invoice.invoiceNumber||invoiceId}; customer=${invoice.customer?.name||"unknown"}; email=${invoice.customer?.email||"MISSING"}; mobile=${invoice.customer?.mobile||invoice.customer?.phone||"MISSING"}`);
+      if(result.configured.email){try{result.email=await sendEmailNotification(invoice,status)}catch(e){result.errors.push(`Email: ${e.message}`)}}else console.error(`[NOTIFICATION] Email channel is NOT configured. Set RESEND_API_KEY and NOTIFICATION_FROM_EMAIL in Render.`);
+      if(result.configured.sms){try{result.sms=await sendSmsNotification(invoice,status)}catch(e){result.errors.push(`SMS: ${e.message}`)}}
+      if(result.email||result.sms)notificationSent.add(key);
+      if(result.errors.length)console.error(`[NOTIFICATION] Order #${invoice.invoiceNumber||invoiceId} errors:`,result.errors);
+      console.log(`[NOTIFICATION] Final result for order #${invoice.invoiceNumber||invoiceId}: email=${result.email}; sms=${result.sms}; configured=${JSON.stringify(result.configured)}; errors=${JSON.stringify(result.errors)}`);
+      return result;
+    }finally{notificationInFlight.delete(key)}
+  })();
+  notificationInFlight.set(key,promise);
+  return promise;
+}
 async function sendPaymentReceipt(invoiceId){const invoice=await getInvoice(invoiceId);const email=invoice?.customer?.email;const payment=invoice?.payments?.[invoice.payments.length-1];if(!invoice||!email||!payment?.id){console.error("Payment receipt could not be sent: invoice, customer email, or payment ID missing.");return false}const message=`Thank you for your payment to Kendis Kitchen.\n\nInvoice: ${invoice.invoiceNumber||invoiceId}\nAmount paid: $${money(payment.amount)}\n\n${invoice.memo||"Your Kendis Kitchen order has been paid in full."}\n\nYour payment receipt is attached. We look forward to serving you!`;const q=`mutation ($input:InvoicePaymentReceiptSendInput!){ invoicePaymentReceiptSend(input:$input){ didSucceed inputErrors{message code path} } }`;const data=await wave(q,{input:{invoiceId,invoicePaymentId:payment.id,to:[email],subject:`Payment confirmed — Kendis Kitchen ${invoice.invoiceNumber||""}`.trim(),message,attachPdf:true}});const out=data.invoicePaymentReceiptSend;if(!out.didSucceed){console.error("Wave payment receipt email failed:",out.inputErrors);return false}console.log(`Payment receipt queued for ${email} for invoice ${invoice.invoiceNumber||invoiceId}`);return true}
 async function sendPaymentReceiptOnce(invoiceId){if(receiptSentInvoices.has(invoiceId))return true;if(receiptInFlight.has(invoiceId))return receiptInFlight.get(invoiceId);const promise=(async()=>{try{const sent=await sendPaymentReceipt(invoiceId);if(sent)receiptSentInvoices.add(invoiceId);return sent}finally{receiptInFlight.delete(invoiceId)}})();receiptInFlight.set(invoiceId,promise);return promise}
 function adminConfigured(){return Boolean(process.env.ADMIN_PASSWORD)}
@@ -110,7 +138,7 @@ app.use(express.static(path.join(__dirname,"public")));
 app.get("/api/menu",(_req,res)=>res.json(MENU));
 app.get("/api/invoice-status",async(req,res)=>{try{const invoiceId=String(req.query.invoiceId||"").trim();if(!invoiceId)return res.status(400).json({error:"invoiceId is required."});const invoice=await getInvoice(invoiceId);if(!invoice)return res.status(404).json({error:"Invoice not found."});const total=Number(invoice.total?.value||0),amountPaid=Number(invoice.amountPaid?.value||0),amountDue=Number(invoice.amountDue?.value||0);const paid=invoice.status==="PAID"||(total>0&&amountDue<=0&&amountPaid>=total);let receiptSent=false;if(paid)receiptSent=await sendPaymentReceiptOnce(invoiceId);res.json({paid,status:invoice.status,invoiceNumber:invoice.invoiceNumber,total,amountPaid,amountDue,invoiceUrl:invoice.viewUrl,receiptSent})}catch(e){console.error("Invoice status error:",e);res.status(500).json({error:e.message||"Could not retrieve invoice status."})}});
 app.get("/api/admin/orders",requireAdmin,async(_req,res)=>{try{const connection=await listInvoices();const orders=(connection.edges||[]).map(({node})=>{const parsed=parseOrderMemo(node.memo||"");const total=Number(node.total?.value||0),amountPaid=Number(node.amountPaid?.value||0);const paid=amountPaid>=total&&total>0;return{id:node.id,invoiceNumber:node.invoiceNumber,invoiceUrl:node.viewUrl,status:parsed.status||(!paid?"UNPAID":"NEW"),waveStatus:node.status,customer:node.customer||{},createdAt:node.createdAt,total,amountPaid,amountDue:Number(node.amountDue?.value||0),pickup:parsed.pickup,notes:parsed.notes,items:(node.items||[]).map(i=>({name:i.product?.name||"Item",quantity:Number(i.quantity||0),price:Number(i.price||0),subtotal:Number(i.subtotal?.value||0)}))}});res.json({orders,total:connection.pageInfo?.totalCount||orders.length})}catch(e){console.error("Admin orders error:",e);res.status(500).json({error:e.message||"Could not load orders."})}});
-app.patch("/api/admin/orders/:invoiceId/status",requireAdmin,async(req,res)=>{try{const status=String(req.body?.status||"").toUpperCase();if(!ORDER_STATUSES.includes(status))return res.status(400).json({error:`Invalid status. Use: ${ORDER_STATUSES.join(", ")}`});const invoice=await patchOrderStatus(req.params.invoiceId,status);let notification=null;if(NOTIFIABLE_STATUSES.includes(status))notification=await sendOrderStatusNotification(req.params.invoiceId,status);res.json({ok:true,invoice,notification})}catch(e){console.error("Admin status update error:",e);res.status(500).json({error:e.message||"Could not update order status."})}});
+app.patch("/api/admin/orders/:invoiceId/status",requireAdmin,async(req,res)=>{try{const status=String(req.body?.status||"").toUpperCase();if(!ORDER_STATUSES.includes(status))return res.status(400).json({error:`Invalid status. Use: ${ORDER_STATUSES.join(", ")}`});console.log(`[NOTIFICATION] Admin status update requested: invoiceId=${req.params.invoiceId}; status=${status}`);const invoice=await patchOrderStatus(req.params.invoiceId,status);let notification=null;if(NOTIFIABLE_STATUSES.includes(status))notification=await sendOrderStatusNotification(req.params.invoiceId,status);console.log(`[NOTIFICATION] Admin status update completed: invoiceId=${req.params.invoiceId}; status=${status}; notification=${JSON.stringify(notification)}`);res.json({ok:true,invoice,notification})}catch(e){console.error("Admin status update error:",e);res.status(500).json({error:e.message||"Could not update order status."})}});
 app.get("/api/admin/notifications/status",requireAdmin,(_req,res)=>res.json({configured:notificationConfig()}));
 app.post("/api/order",async(req,res)=>{try{const {customer,items,pickupDate,pickupTime,notes}=req.body;if(!process.env.WAVE_BUSINESS_ID||!process.env.WAVE_ACCESS_TOKEN)return res.status(500).json({error:"Wave is not connected yet. Add the Wave access token and Kendis Kitchen business ID in Render."});if(!customer?.name||!customer?.email||!pickupDate||!pickupTime)return res.status(400).json({error:"Please provide name, email, pickup date, and pickup time."});if(!Array.isArray(items)||!items.length)return res.status(400).json({error:"Please select at least one menu item."});const normalized=items.map(i=>{const menuItem=MENU.find(m=>m.name===i.name);const quantity=Math.max(1,Number(i.quantity||1));if(!menuItem)throw new Error(`Menu item not found: ${i.name}`);return{...menuItem,quantity}});const subtotal=normalized.reduce((s,i)=>s+i.price*i.quantity,0);let waveCustomer=await findCustomer(customer.email);if(waveCustomer)waveCustomer=await updateCustomer(waveCustomer,customer);else waveCustomer=await createCustomer(customer);const invoiceItems=[];for(const item of normalized){const product=await findOrCreateProduct(item);invoiceItems.push({productId:product.id,quantity:String(item.quantity),unitPrice:money(item.price)})}const memo=["Kendis Kitchen online order","Order Status: NEW",`Pickup: ${pickupDate} at ${pickupTime}`,notes?`Customer notes: ${notes}`:""].filter(Boolean).join("\n");const mutation=`mutation ($input:InvoiceCreateInput!){ invoiceCreate(input:$input){ didSucceed inputErrors{message code path} invoice{id invoiceNumber viewUrl status disableCreditCardPayments disableBankPayments disableAmexPayments total{value currency{symbol}} amountDue{value currency{symbol}} amountPaid{value currency{symbol}} } } }`;const invoiceData=await wave(mutation,{input:{businessId:process.env.WAVE_BUSINESS_ID,customerId:waveCustomer.id,status:"SAVED",items:invoiceItems,memo,disableBankPayments:false,disableCreditCardPayments:false,disableAmexPayments:false,requireTermsOfServiceAgreement:false}});const invoice=invoiceData.invoiceCreate.invoice;if(!invoiceData.invoiceCreate.didSucceed||!invoice)throw new Error(invoiceData.invoiceCreate.inputErrors?.map(e=>e.message).join("; ")||"Wave could not create the invoice.");const eventTitle=`Kendis Kitchen Order ${invoice.invoiceNumber||""}`.trim();const details=`Kendis Kitchen order\nWave invoice: ${invoice.viewUrl}\nTotal: $${money(subtotal)}\n${normalized.map(i=>`${i.quantity} × ${i.name}`).join("\n")}${notes?`\nNotes: ${notes}`:""}`;const start=`${pickupDate.replaceAll("-","")}T${pickupTime.replace(":","")}00`;const calendarUrl="https://calendar.google.com/calendar/render?action=TEMPLATE"+`&text=${encodeURIComponent(eventTitle)}`+`&dates=${encodeURIComponent(start+"/"+start)}`+`&details=${encodeURIComponent(details)}`;res.json({invoiceId:invoice.id,invoiceUrl:invoice.viewUrl,invoiceNumber:invoice.invoiceNumber,total:subtotal,calendarUrl,message:"Order created in Wave. Use the Pay Now button on the hosted Wave invoice to complete payment."})}catch(e){console.error(e);res.status(500).json({error:e.message||"Something went wrong creating the order."})}});
 app.get("/admin",(_req,res)=>res.sendFile(path.join(__dirname,"public","admin.html")));
