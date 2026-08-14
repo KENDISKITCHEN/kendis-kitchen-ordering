@@ -1,6 +1,6 @@
 # Kendis Kitchen Online Ordering App
 
-This app is designed for Kendis Kitchen and uses the Wave API for customers, products, invoices, payments, and payment receipts.
+This app is designed for Kendis Kitchen and uses the Wave API for customers, products, invoices, payments, payment receipts, and the order-management dashboard.
 
 ## What it does
 - Shows the Kendis Kitchen menu with categories.
@@ -14,6 +14,9 @@ This app is designed for Kendis Kitchen and uses the Wave API for customers, pro
 - Detects payment status from Wave.
 - Sends a Wave payment receipt to the customer's email after the invoice is paid, with the receipt PDF attached when supported by the Wave business email settings.
 - Gives the customer a Google Calendar "Add to Google Calendar" link for the pickup appointment.
+- Provides a password-protected `/admin` order-management dashboard.
+- Lets the kitchen move paid orders through NEW, CONFIRMED, PREPARING, READY, COMPLETED, and CANCELLED.
+- Stores the kitchen status in the Wave invoice memo so the status remains available after a Render restart.
 
 ## Menu categories
 The online menu is organized into:
@@ -37,12 +40,19 @@ Wave's public API exposes a `disableCreditCardPayments` setting, but it does not
    - `WAVE_BUSINESS_ID` = the Kendis Kitchen Wave business ID
    - `WAVE_WEBHOOK_SECRET` = the signing secret for the Wave webhook
    - `WAVE_INCOME_ACCOUNT_ID` = optional; use this if you want to explicitly control the Wave income account used for menu products
+   - `ADMIN_PASSWORD` = a strong password used for `/admin`
 7. Deploy.
 
-Do NOT put the Wave access token or webhook secret in GitHub or in browser code.
+Do NOT put the Wave access token, webhook secret, or admin password in GitHub or in browser code.
+
+## Admin dashboard
+After deployment, open:
+`https://YOUR-RENDER-URL.onrender.com/admin`
+
+The dashboard requires `ADMIN_PASSWORD` to be configured in Render. It reads order/customer/payment information from Wave and uses Wave's `invoicePatch` mutation to persist the kitchen status in the invoice memo.
 
 ## Wave setup
-The Wave Developer application needs access to the relevant resources. For this app, the token must be able to read/write customers, products, and invoices. The app also uses Wave's `invoice.paid` webhook event so it can trigger a payment receipt when an invoice is paid. Wave documents `invoice.paid` as a supported webhook event and provides the `invoicePaymentReceiptSend` mutation for sending an invoice payment receipt. The Wave business must have its email-sending capability enabled for Wave email features to work.
+The Wave Developer application needs access to the relevant resources. For this app, the token must be able to read/write customers, products, and invoices. The app also uses Wave's `invoice.paid` webhook event so it can trigger a payment receipt when an invoice is paid. The Wave business must have its email-sending capability enabled for Wave email features to work.
 
 Webhook endpoint:
 `https://YOUR-RENDER-URL.onrender.com/api/wave-webhook`
